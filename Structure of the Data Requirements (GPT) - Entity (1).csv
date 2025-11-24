@@ -1,0 +1,139 @@
+Entity,Mô tả,Attributes (Thuộc tính),Primary Key (PK),Foreign Keys (FK),Ghi chú / Đặc điểm ER/EER
+USERS,"Bảng cốt lõi, lưu trữ thông tin xác thực và định danh cơ bản cho mỗi tài khoản người dùng.","- user_id (UID, PRIMARY KEY): Khóa chính, là một số nguyên lớn tự tăng để định danh duy nhất cho mỗi người dùng.
+- email (VARCHAR(255), UNIQUE, NOT NULL): Địa chỉ email của người dùng, được sử dụng để đăng nhập và nhận thông báo. Ràng buộc UNIQUE đảm bảo không có hai tài khoản nào trùng email.
+- phone_number (VARCHAR(20), UNIQUE): Số điện thoại của người dùng, có thể là NULL. Ràng buộc UNIQUE đảm bảo số điện thoại không bị trùng lặp nếu được cung cấp.
+- password_hash (VARCHAR(255), NOT NULL): Chuỗi mật khẩu đã được mã hóa bằng các thuật toán hashing an toàn (ví dụ: bcrypt, Argon2). Không bao giờ lưu mật khẩu dạng văn bản thô.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm tài khoản được tạo.
+- last_login (TIMESTAMP, NULL): Dấu thời gian ghi nhận lần đăng nhập cuối cùng của người dùng, có thể là NULL nếu chưa đăng nhập lần nào.
+- is_active (BOOLEAN, NOT NULL, DEFAULT TRUE): Trạng thái của tài khoản (TRUE: hoạt động, FALSE: bị khóa hoặc vô hiệu hóa).",user_id,–,"Composite: Name = (First, Middle, Last). Derived: Age từ DateOfBirth."
+PROFILES,Lưu trữ hồ sơ cá nhân của USER (quan hệ 1-1).,"- profile_id (UID, PRIMARY KEY): Khóa chính của bảng hồ sơ.
+- user_id (UID, FOREIGN KEY, UNIQUE, NOT NULL): Khóa ngoại, liên kết 1-1 tới bảng USERS. Ràng buộc UNIQUE đảm bảo mỗi người dùng chỉ có duy nhất một hồ sơ.
+- first_name (VARCHAR(100)): Tên của người dùng.
+- last_name (VARCHAR(100)): Họ của người dùng.
+- bio (TEXT): Một đoạn văn bản ngắn giới thiệu về bản thân người dùng.
+- date_of_birth (DATE): Ngày sinh của người dùng.
+- gender (ENUM('MALE', 'FEMALE', 'OTHER')): Giới tính của người dùng, được giới hạn trong các giá trị cho trước.
+- profile_picture_url (VARCHAR(255)): Đường dẫn (URL) đến tệp ảnh đại diện của người dùng.
+- cover_photo_url (VARCHAR(255)): Đường dẫn (URL) đến tệp ảnh bìa của người dùng.",profile_id,user_id,
+ROLES,Danh sách các vai trò hệ thống.,"- role_id (UID, PRIMARY KEY): Khóa chính để định danh duy nhất cho mỗi vai trò.
+- role_name (VARCHAR(50), UNIQUE, NOT NULL): Tên của vai trò (ví dụ: 'ADMIN', 'USER', 'MODERATOR').
+- description (TEXT): Mô tả chi tiết về các quyền hạn của vai trò này.",role_id,–,
+USER_ROLES,Gán vai trò cho USER (N-N).,"- user_id (PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới USERS(user_id).
+- role_id (PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới ROLES(role_id).","(user_id, role_id)","user_id, role_id",
+FRIENDSHIPS,Mối quan hệ bạn bè giữa hai USER.,"- user_one_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp. Theo quy ước, đây là ID của người dùng có giá trị nhỏ hơn để đảm bảo tính duy nhất.
+- user_two_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp. Theo quy ước, đây là ID của người dùng có giá trị lớn hơn.
+- status (ENUM('PENDING', 'ACCEPTED', 'BLOCKED'), NOT NULL): Trạng thái hiện tại của mối quan hệ (PENDING: Đang chờ chấp nhận, ACCEPTED: Đã là bạn bè, BLOCKED: Bị chặn).
+- action_user_id (UID, FOREIGN KEY, NOT NULL): ID của người dùng đã thực hiện hành động cuối cùng (gửi yêu cầu, chấp nhận, chặn).
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm mối quan hệ được khởi tạo (khi lời mời được gửi).","(user_one_id, user_two_id)","user_one_id, user_two_id, action_user_id",Recursive USER–USER; biểu diễn trạng thái yêu cầu/kết bạn.
+,,,,,
+POSTS,"Bài đăng gốc (superclass), tác giả có thể là USER hoặc PAGE.","- post_id (PRIMARY KEY): Khóa chính, là một số nguyên lớn tự tăng để định danh duy nhất cho mỗi bài đăng.
+- author_id (BIGINT, NOT NULL): ID của tác giả. Đây là một phần của quan hệ đa hình, có thể là user_id hoặc page_id.
+- author_type (ENUM('USER', 'PAGE'), NOT NULL): Xác định loại tác giả, cho biết author_id thuộc về bảng USERS hay PAGES.
+- text_content (TEXT): Nội dung văn bản của bài đăng, có thể là NULL nếu bài đăng chỉ chứa media.
+- privacy_setting (ENUM('PUBLIC', 'FRIENDS', 'ONLY_ME'), NOT NULL, DEFAULT 'FRIENDS'): Thiết lập quyền riêng tư cho bài đăng.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm bài đăng được tạo.
+- updated_at (TIMESTAMP, NULL, ON UPDATE CURRENT_TIMESTAMP): Dấu thời gian ghi nhận lần cuối cùng bài đăng được chỉnh sửa.
+
+- post_type (ENUM('ORIGINAL', 'SHARE'), DEFAULT 'ORIGINAL'): Xác định đây là bài đăng gốc, hay là bài đăng share.
+- parent_post_id (UID): NULL nếu post_type là ORIGINAL, ngược lại, sẽ là post_id của bài gốc được share.",post_id,–,Bài POST share không được đính kèm thêm FILE
+POST_LOCATIONS,"Ghi lại vị trí đăng bài (tường nhà, nhóm).","- post_id (PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới POSTS(post_id).
+- location_id (PRIMARY KEY): Một phần của khóa chính phức hợp. ID của vị trí (có thể là user_id hoặc group_id).
+- location_type (ENUM('USER_TIMELINE', 'GROUP'), PRIMARY KEY): Một phần của khóa chính phức hợp, xác định loại vị trí.","(post_id, location_id, location_type)",post_id,
+FILES,"Lưu trữ siêu dữ liệu (metadata) cho mọi tệp được người dùng tải lên hệ thống, từ hình ảnh, video cho đến tài liệu PDF, file nén ZIP, v.v.","- file_id (UID, PK, AUTO_INCREMENT): Khóa chính, ID duy nhất cho mỗi tệp.
+- uploader_user_id (UID, FK, NOT NULL): ID của người đã tải tệp lên. Liên kết tới USERS(user_id).
+- file_name (VARCHAR(255), NOT NULL): Tên gốc của tệp (ví dụ: ""bao_cao_quy_4.docx"").
+- file_type (VARCHAR(100), NOT NULL): Loại tệp, nên lưu dưới dạng MIME Type để có độ chính xác cao nhất (ví dụ: 'image/jpeg', 'application/pdf', 'video/mp4').
+- file_size (INT, NOT NULL): Kích thước tệp (tính bằng bytes).
+- file_url (VARCHAR(255), NOT NULL): URL để truy cập hoặc tải tệp.
+- thumbnail_url (VARCHAR(255)): URL ảnh thu nhỏ, hữu ích cho việc hiển thị preview của ảnh và video, có thể là NULL với các loại tệp khác.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Thời điểm tệp được tải lên.",file_id,uploader_user_id,
+POST_FILES,Gắn FILE vào một POST.,"- post_id (PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới POSTS(post_id).
+- file_id (PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới FILES(file_id).
+- display_order (INT, NOT NULL, DEFAULT 0): Số nguyên xác định thứ tự hiển thị của tệp trong bài đăng, hữu ích khi có nhiều tệp.","(post_id, file_id)","post_id, file_id",
+COMMENTS,"Bình luận trên các đối tượng khác nhau (bài đăng, media...).","- comment_id (PRIMARY KEY): Khóa chính, định danh duy nhất cho mỗi bình luận.
+- commenter_user_id (FOREIGN KEY, NOT NULL): ID của người dùng đã viết bình luận, liên kết tới USERS(user_id).
+- commentable_id (NOT NULL): ID của đối tượng được bình luận (ví dụ: post_id, file_id).
+- commentable_type (ENUM('POST', 'FILE'), NOT NULL): Xác định loại đối tượng được bình luận.
+- parent_comment_id (BIGINT, FOREIGN KEY, NULL): ID của bình luận cha nếu đây là một bình luận trả lời (reply), liên kết tới chính bảng COMMENTS(comment_id).
+- text_content (TEXT, NOT NULL): Nội dung văn bản của bình luận.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm bình luận được tạo.",comment_id,"commenter_user_id, parent_comment_id",
+REACTIONS,"Tương tác cảm xúc trên các đối tượng khác nhau (bài đăng, bình luận...).","- reactor_user_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của người dùng bày tỏ cảm xúc, liên kết tới USERS(user_id).
+- reactable_id (UID, PRIMARY KEY): Một phần của khóa chính phức hợp, ID của đối tượng được tương tác.
+- reactable_type (ENUM('POST', 'COMMENT'), PRIMARY KEY): Một phần của khóa chính phức hợp, xác định loại đối tượng được tương tác.
+- reaction_type (ENUM('LIKE', 'LOVE', 'HAHA', 'SAD', 'ANGRY'), NOT NULL): Loại cảm xúc được thể hiện.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm tương tác được tạo.","(reactor_user_id, reactable_id, reactable_type)",reactor_user_id,
+,,,,,
+PAGES,Đại diện cho một trang của tổ chức/doanh nghiệp.,"- page_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, là một số nguyên lớn tự tăng để định danh duy nhất cho mỗi trang.
+- page_name (VARCHAR(255), NOT NULL): Tên hiển thị công khai của trang.
+- username (VARCHAR(100), UNIQUE): Tên người dùng duy nhất của trang (ví dụ: @google.vietnam), dùng để tạo URL thân thiện và để tag trang.
+- category (VARCHAR(100)): Danh mục hoạt động của trang (ví dụ: 'Công ty công nghệ', 'Nhà hàng', 'Nghệ sĩ').
+- description (TEXT): Phần mô tả chi tiết, giới thiệu về mục đích và thông tin của trang.
+- contact_info (JSON or TEXT): Lưu trữ thông tin liên hệ như email, số điện thoại, địa chỉ dưới dạng văn bản hoặc cấu trúc JSON.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm trang được tạo.",page_id,–,
+PAGE_ROLES,Gán vai trò quản lý PAGE cho USER.,"- user_id (BIGINT, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới USERS(user_id).
+- page_id (BIGINT, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, liên kết tới PAGES(page_id).
+- role (ENUM('ADMIN', 'EDITOR', 'MODERATOR', 'ANALYST'), NOT NULL): Vai trò của người dùng trên trang, xác định các quyền hạn của họ.","(user_id, page_id)","user_id, page_id",
+PAGE_FOLLOWS,Ghi lại việc USER theo dõi PAGE.,"- user_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của người dùng theo dõi, liên kết tới USERS(user_id).
+- page_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của trang được theo dõi, liên kết tới PAGES(page_id).
+- followed_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm người dùng bắt đầu theo dõi trang.","(user_id, page_id)","user_id, page_id",
+GROUPS,Đại diện cho một cộng đồng (nhóm).,"- group_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi nhóm.
+- creator_user_id (BIGINT, FOREIGN KEY, NOT NULL): ID của người dùng đã tạo ra nhóm, liên kết tới USERS(user_id).
+- group_name (VARCHAR(255), NOT NULL): Tên hiển thị của nhóm.
+- description (TEXT): Mô tả chi tiết về mục đích, chủ đề và nội quy của nhóm.
+- cover_photo_url (VARCHAR(255)): Đường dẫn (URL) đến tệp ảnh bìa của nhóm.
+- privacy_type (ENUM('PUBLIC', 'PRIVATE'), NOT NULL): Xác định tính riêng tư của nhóm (PUBLIC: ai cũng thấy nội dung, PRIVATE: chỉ thành viên thấy).
+- is_visible (BOOLEAN, NOT NULL, DEFAULT TRUE): Xác định liệu một nhóm PRIVATE có thể được tìm thấy qua công cụ tìm kiếm hay không.
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm nhóm được tạo.",group_id,creator_user_id,
+GROUP_MEMBERSHIPS,Ghi lại tư cách thành viên của USER trong GROUP.,"- user_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của thành viên, liên kết tới USERS(user_id).
+- group_id (BIGINT, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của nhóm, liên kết tới GROUPS(group_id).
+- role (ENUM('ADMIN', 'MODERATOR', 'MEMBER'), NOT NULL, DEFAULT 'MEMBER'): Vai trò của thành viên trong nhóm.
+- status (ENUM('JOINED', 'PENDING', 'BANNED', 'INVITED'), NOT NULL): Trạng thái của thành viên (đã tham gia, đang chờ duyệt, bị cấm, đã được mời).
+- joined_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm người dùng chính thức tham gia nhóm.","(user_id, group_id)","user_id, group_id",
+GROUP_RULES,Lưu trữ các quy tắc của GROUP.,"- rule_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi quy tắc.
+- group_id (BIGINT, FOREIGN KEY, NOT NULL): ID của nhóm sở hữu quy tắc này, liên kết tới GROUPS(group_id).
+- title (VARCHAR(255), NOT NULL): Tiêu đề ngắn gọn của quy tắc.
+- details (TEXT): Nội dung mô tả chi tiết của quy tắc.
+-display_order (INT, NOT NULL, DEFAULT 0): Số nguyên xác định thứ tự hiển thị của các quy tắc.",rule_id,group_id,
+MEMBERSHIP_QUESTIONS,Câu hỏi phải trả lời khi tham gia GROUP.,"- question_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi câu hỏi.
+- group_id (UID, FOREIGN KEY, NOT NULL): ID của nhóm sở hữu câu hỏi, liên kết tới GROUPS(group_id).
+- question_text (TEXT, NOT NULL): Nội dung của câu hỏi mà người xin tham gia phải trả lời.",question_id,group_id,
+MEMBERSHIP_ANSWERS,Câu trả lời của USER cho MEMBERSHIP_QUESTION.,"- user_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của người trả lời, liên kết tới USERS(user_id).
+- group_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của nhóm mà người dùng đang xin tham gia, liên kết tới GROUPS(group_id).
+- question_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của câu hỏi được trả lời, liên kết tới MEMBERSHIP_QUESTIONS(question_id).
+- answer_text (TEXT, NOT NULL): Nội dung câu trả lời của người dùng.","(user_id, group_id, question_id)","user_id, group_id, question_id",
+,,,,,
+EVENTS,Đại diện cho một sự kiện được lên lịch.,"- event_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi sự kiện.
+- host_id (UID, NOT NULL): ID của người hoặc trang đứng ra tổ chức sự kiện.
+- host_type (ENUM('USER', 'PAGE'), NOT NULL): Xác định host_id là của một USER hay một PAGE.
+- event_name (VARCHAR(255), NOT NULL): Tên của sự kiện.
+- description (TEXT): Mô tả chi tiết về nội dung, lịch trình và các thông tin liên quan của sự kiện.
+- start_time (TIMESTAMP, NOT NULL): Dấu thời gian ghi nhận thời điểm sự kiện bắt đầu.
+- end_time (TIMESTAMP): Dấu thời gian ghi nhận thời điểm sự kiện kết thúc.
+- location_text (TEXT): Địa điểm diễn ra sự kiện dưới dạng văn bản (ví dụ: ""Sân vận động Mỹ Đình, Hà Nội"").
+- privacy_setting (ENUM('PUBLIC', 'PRIVATE', 'FRIENDS'), NOT NULL): Thiết lập quyền riêng tư, xác định ai có thể xem và tham gia sự kiện.",event_id,–,
+EVENT_PUBLICATIONS,Ghi lại việc EVENT được đăng ở đâu.,"- publication_id (UID, PRIMARY KEY): Khóa chính, định danh cho mỗi lần đăng tải sự kiện.
+- event_id (UID, FOREIGN KEY, NOT NULL): ID của sự kiện được đăng tải, liên kết tới EVENTS(event_id).
+- publisher_id (UID, NOT NULL): ID của người hoặc trang đã thực hiện hành động đăng.
+- publisher_type (ENUM('USER', 'PAGE'), NOT NULL): Xác định loại của publisher_id.
+- location_id (UID, NOT NULL): ID của nơi sự kiện được đăng (ví dụ: user_id, group_id).
+- location_type (ENUM('USER_TIMELINE', 'GROUP', 'PAGE_TIMELINE'), NOT NULL): Xác định loại của location_id.",publication_id,event_id,
+EVENT_PARTICIPANTS,Ghi lại phản hồi của USER đối với EVENT.,"- event_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của sự kiện, liên kết tới EVENTS(event_id).
+- user_id (UID, PRIMARY KEY, FOREIGN KEY): Một phần của khóa chính phức hợp, ID của người dùng phản hồi, liên kết tới USERS(user_id).
+- rsvp_status (ENUM('GOING', 'INTERESTED', 'CANT_GO'), NOT NULL): Trạng thái tham gia của người dùng (Sẽ đi, Quan tâm, Không đi được).
+- updated_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP): Dấu thời gian ghi nhận lần cuối người dùng cập nhật trạng thái.","(event_id, user_id)","event_id, user_id",
+REPORTS,"Bảng trung gian, ghi lại một báo cáo do người dùng gửi về một nội dung hoặc một người dùng khác.","- report_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi báo cáo. 
+- reporter_user_id (UID, FOREIGN KEY, NOT NULL): ID của người dùng đã gửi báo cáo, liên kết tới USERS(user_id). 
+- reportable_id (UID, NOT NULL): ID của đối tượng bị báo cáo (ví dụ: post_id, comment_id, user_id...). 
+- reportable_type (ENUM('POST', 'COMMENT', 'USER', 'PAGE', 'GROUP'), NOT NULL): Xác định reportable_id thuộc về bảng nào. 
+- reason_id (INT, FOREIGN KEY, NOT NULL): ID của lý do báo cáo, liên kết tới REPORT_REASONS(reason_id). 
+- status (ENUM('PENDING', 'REVIEWED', 'ACTION_TAKEN', 'DISMISSED'), NOT NULL, DEFAULT 'PENDING'): Trạng thái xử lý của báo cáo. 
+- created_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm báo cáo được gửi.",report_id,reporter_user_id (→ USERS) reason_id (→ REPORT_REASONS),"Thực thể trung tâm, sử dụng quan hệ đa hình để báo cáo nhiều loại đối tượng khác nhau."
+REPORT_REASONS,Danh sách các lý do báo cáo được định nghĩa trước bởi hệ thống.,"- reason_id (INT, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi lý do. 
+- title (VARCHAR(255), NOT NULL): Tiêu đề ngắn gọn của lý do (ví dụ: ""Spam"", ""Ngôn từ gây thù ghét""). 
+- description (TEXT): Mô tả chi tiết để người dùng hiểu rõ hơn về lý do.",reason_id,–,Bảng tra cứu (lookup table) để chuẩn hóa dữ liệu báo cáo.
+REPORT_ACTIONS,Ghi lại hành động xử lý của quản trị viên (Admin) đối với một báo cáo cụ thể.,"- action_id (UID, PRIMARY KEY, AUTO_INCREMENT): Khóa chính, định danh duy nhất cho mỗi hành động xử lý. 
+- report_id (UID, FOREIGN KEY, NOT NULL): ID của báo cáo được xử lý, liên kết tới REPORTS(report_id). 
+- reviewer_admin_id (UID, FOREIGN KEY, NOT NULL): ID của quản trị viên đã xử lý, liên kết tới USERS(user_id). 
+- action_taken (ENUM('DELETE_CONTENT', 'BAN_USER', 'WARN_USER', 'DISMISS_REPORT'), NOT NULL): Hành động cụ thể đã được thực hiện. 
+- notes (TEXT, NULL): Ghi chú nội bộ của quản trị viên về quyết định xử lý. 
+- action_at (TIMESTAMP, NOT NULL, DEFAULT CURRENT_TIMESTAMP): Dấu thời gian ghi nhận thời điểm xử lý.",action_id,report_id (→ REPORTS) reviewer_admin_id (→ USERS),Bảng nhật ký (log) theo dõi. Liên kết báo cáo với người xử lý (Admin).
