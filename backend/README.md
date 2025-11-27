@@ -50,3 +50,6 @@ curl -X POST http://localhost:8000/posts \
 ```
 
 Tables are auto-created at startup from the SQLAlchemy models. The OpenAPI docs are available at `http://localhost:8000/docs` and every entity exposes standard CRUD routes (POST/GET/PUT/DELETE) under intuitive prefixes (e.g., `/users`, `/posts`, `/group-memberships/{user_id}/{group_id}`).
+
+After running uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+-----> OPEN LINK: http://localhost:8000/docs#/ to OPEN SWAGGER UI 

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response,UploadFile, File as FastAPIFile
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 import os
@@ -10,6 +11,10 @@ from passlib.context import CryptContext
 from .database import get_db
 from . import models, schemas
 from sqlalchemy import desc, func
+from typing import Optional
+from .cloudinary_utils import upload_to_cloudinary
+from uuid import uuid4
+from fastapi import Body
 
 router = APIRouter()
 
@@ -42,10 +47,33 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
 def _get_user_by_id(db: Session, user_id: int):
     return db.query(models.User).filter(models.User.user_id == user_id).first()
 
+# def get_current_user_from_cookie(request: Request, db: Session):
+#     token = request.cookies.get("access_token")
+#     if not token:
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+#     try:
+#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+#         sub = payload.get("sub")
+#         if not sub:
+#             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+#         user = _get_user_by_id(db, int(sub))
+#         if not user:
+#             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+#         return user
+#     except JWTError:
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 def get_current_user_from_cookie(request: Request, db: Session):
     token = request.cookies.get("access_token")
+
+    # fallback to Authorization header so SPA/localStorage flows work too
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         sub = payload.get("sub")
@@ -57,46 +85,89 @@ def get_current_user_from_cookie(request: Request, db: Session):
         return user
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+# --- Helpers ---
+def _friendship_status(db: Session, viewer_id: Optional[int], target_id: int) -> str:
+    if viewer_id is None or viewer_id == target_id:
+        return "NONE" if viewer_id is None else "SELF"
+    fr = _get_friendship_by_users(db, viewer_id, target_id)
+    return fr.status.value if fr else "NONE"
+
 
 # --- Auth endpoints: register / login / logout / users/me ---
 @router.post('/auth/register', status_code=status.HTTP_201_CREATED)
 def auth_register(payload: dict, response: Response, db: Session = Depends(get_db)):
     # payload expected: {email, password, phone_number?, first_name?, last_name?}
-    email = payload.get('email')
-    password = payload.get('password')
-    phone = payload.get('phone_number')
-    first_name = payload.get('first_name')
-    last_name = payload.get('last_name')
+        email = payload.get('email')
+        password = payload.get('password')
+        phone = payload.get('phone_number')
+        first_name = payload.get('first_name') or ""
+        last_name = payload.get('last_name') or ""
+        date_of_birth = payload.get('date_of_birth')
+        gender = payload.get('gender')
 
-    if not email or not password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing email or password")
+        if not email or not password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing email or password"
+            )
 
-    # basic uniqueness checks
-    existing = db.query(models.User).filter(models.User.email == email).first()
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_EXIST")
+        # --- check trùng email ---
+        existing_email = db.query(models.User).filter(models.User.email == email).first()
+        if existing_email:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="EMAIL_EXIST"
+            )
 
-    user = models.User(
-        email=email,
-        phone_number=phone,
-        password_hash=hash_password(password),
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+        # --- check trùng phone (nếu có) ---
+        if phone:
+            existing_phone = db.query(models.User).filter(models.User.phone_number == phone).first()
+            if existing_phone:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="PHONE_EXIST"
+                )
 
-    # create empty profile linked to user
-    try:
-        profile = models.Profile(user_id=user.user_id, first_name=(first_name or ""), last_name=(last_name or ""))
-        db.add(profile)
+        # tạo user
+        user = models.User(
+            email=email,
+            phone_number=phone,
+            password_hash=hash_password(password),
+        )
+        db.add(user)
         db.commit()
-    except Exception:
-        db.rollback()
+        db.refresh(user)
 
-    # create token and set HttpOnly cookie
-    token = create_access_token({"sub": str(user.user_id)})
-    response.set_cookie(key="access_token", value=token, httponly=True, samesite="lax", max_age=ACCESS_TOKEN_EXPIRE_MINUTES*60)
-    return {"message": "Đăng ký thành công", "user": {"id": user.user_id, "email": user.email}}
+        # tạo profile kèm thông tin cơ bản
+        try:
+            profile = models.Profile(
+                user_id=user.user_id,
+                first_name=first_name,
+                last_name=last_name,
+                date_of_birth=date_of_birth,   # DB kiểu DATE thì passing string YYYY-MM-DD vẫn ok
+                gender=gender,
+            )
+            db.add(profile)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        # tạo token + set cookie
+        token = create_access_token({"sub": str(user.user_id)})
+        response.set_cookie(
+            key="access_token",
+            value=token,
+            httponly=True,
+            samesite="lax",
+            max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        )
+        return {
+            "message": "Đăng ký thành công",
+            "user": {
+                "id": user.user_id,
+                "email": user.email
+            }
+        }
 
 
 @router.post('/auth/login')
@@ -128,14 +199,30 @@ def auth_logout(response: Response):
     return {"message": "Logged out"}
 
 
+
 @router.get('/users/me')
 def users_me(request: Request, db: Session = Depends(get_db)):
     user = get_current_user_from_cookie(request, db)
     profile = db.query(models.Profile).filter(models.Profile.user_id == user.user_id).first()
-    data = {"user_id": user.user_id, "email": user.email}
+
+    data = {
+        "user_id": user.user_id,
+        "email": user.email,
+    }
+
     if profile:
-        data.update({"first_name": profile.first_name, "last_name": profile.last_name, "profile_picture_url": profile.profile_picture_url})
+        data.update({
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+            "profile_picture_url": profile.profile_picture_url,
+            "cover_photo_url": getattr(profile, "cover_photo_url", None),
+            "bio": getattr(profile, "bio", None),
+            "date_of_birth": getattr(profile, "date_of_birth", None),
+            "gender": getattr(profile, "gender", None),
+        })
+
     return data
+
 
 
 @router.get('/users/suggestions')
@@ -461,14 +548,16 @@ register_simple_crud(
     response_schema=schemas.Role,
     pk_field="role_id",
 )
-register_simple_crud(
-    prefix="posts",
-    model_cls=models.Post,
-    create_schema=schemas.PostCreate,
-    update_schema=schemas.PostUpdate,
-    response_schema=schemas.Post,
-    pk_field="post_id",
-)
+# register_simple_crud(
+#     prefix="posts",
+#     model_cls=models.Post,
+#     create_schema=schemas.PostCreate,
+#     update_schema=schemas.PostUpdate,
+#     response_schema=schemas.Post,
+#     pk_field="post_id",
+# )
+#  CÓ THỂ SẼ CHỈNH SỬA ROUTES POST SAU NÀY
+
 register_simple_crud(
     prefix="files",
     model_cls=models.File,
@@ -713,6 +802,133 @@ def create_post_location(payload: schemas.PostLocationBase, db: Session = Depend
     db.add(record)
     db.commit()
     return record
+
+@router.post("/posts", status_code=status.HTTP_201_CREATED)
+def create_post(
+    payload: dict = Body(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Tạo post mới.
+
+    payload ví dụ:
+    {
+        "text_content": "hello",
+        "privacy_setting": "PUBLIC",      # PUBLIC | FRIENDS | ONLY_ME
+        "file_ids": [1, 2, 3],            # optional
+        "location_type": "USER_TIMELINE", # USER_TIMELINE | GROUP | PAGE_TIMELINE
+        "location_id": 123                # với USER_TIMELINE có thể bỏ, mặc định = user hiện tại
+    }
+    """
+    current = get_current_user_from_cookie(request, db)
+
+    text_content = (payload.get("text_content") or "").strip()
+    file_ids = payload.get("file_ids") or []
+
+    # không cho post trống hoàn toàn
+    if not text_content and not file_ids:
+        raise HTTPException(status_code=400, detail="EMPTY_POST")
+
+    # --- privacy ---
+    privacy = payload.get("privacy_setting") or models.PrivacySetting.PUBLIC
+    if isinstance(privacy, str):
+        try:
+            privacy = models.PrivacySetting[privacy]
+        except KeyError:
+            raise HTTPException(status_code=400, detail="INVALID_PRIVACY")
+
+    # --- location ---
+    location_type = payload.get("location_type") or models.LocationType.USER_TIMELINE
+    if isinstance(location_type, str):
+        try:
+            location_type = models.LocationType[location_type]
+        except KeyError:
+            raise HTTPException(status_code=400, detail="INVALID_LOCATION_TYPE")
+
+    location_id = payload.get("location_id")
+
+    # USER_TIMELINE: chỉ được post lên timeline của chính mình
+    if location_type == models.LocationType.USER_TIMELINE:
+        if location_id is None:
+            location_id = current.user_id
+        if location_id != current.user_id:
+            raise HTTPException(status_code=403, detail="CANNOT_POST_TO_OTHER_TIMELINE")
+
+    # GROUP: phải là member JOINED
+    elif location_type == models.LocationType.GROUP:
+        if not location_id:
+            raise HTTPException(status_code=400, detail="MISSING_LOCATION_ID")
+        gm = db.query(models.GroupMembership).filter(
+            models.GroupMembership.group_id == location_id,
+            models.GroupMembership.user_id == current.user_id,
+            models.GroupMembership.status == models.GroupMemberStatus.JOINED,
+        ).first()
+        if not gm:
+            raise HTTPException(status_code=403, detail="GROUP_NOT_JOINED")
+
+    # PAGE_TIMELINE: phải có PageRole bất kỳ
+    elif location_type == models.LocationType.PAGE_TIMELINE:
+        if not location_id:
+            raise HTTPException(status_code=400, detail="MISSING_LOCATION_ID")
+        role = db.query(models.PageRole).filter(
+            models.PageRole.user_id == current.user_id,
+            models.PageRole.page_id == location_id,
+        ).first()
+        if not role:
+            raise HTTPException(status_code=403, detail="PAGE_ACCESS_DENIED")
+
+    else:
+        # nếu spec có thêm các loại khác, sau này bổ sung tiếp
+        raise HTTPException(status_code=400, detail="UNSUPPORTED_LOCATION_TYPE")
+
+    # --- tạo Post ---
+    post = models.Post(
+        author_id=current.user_id,
+        author_type=models.PostAuthorType.USER,
+        text_content=text_content,
+        privacy_setting=privacy,
+        post_type=models.PostType.REGULAR,  # enum REGULAR/SHARE/...; dùng giá trị text tuỳ bạn khai báo
+    )
+    db.add(post)
+    db.commit()
+    db.refresh(post)
+
+    # --- gắn PostLocation ---
+    pl = models.PostLocation(
+        post_id=post.post_id,
+        location_id=location_id,
+        location_type=location_type,
+    )
+    db.add(pl)
+
+    # --- gắn PostFile (nếu có file_ids) ---
+    for fid in file_ids:
+        file_obj = db.query(models.File).filter(
+            models.File.file_id == fid,
+            models.File.uploader_user_id == current.user_id,  # đảm bảo file của chính user
+        ).first()
+        if not file_obj:
+            # bỏ qua file không tồn tại/không đúng owner
+            continue
+        link = models.PostFile(post_id=post.post_id, file_id=file_obj.file_id)
+        db.merge(link)
+
+    db.commit()
+
+    return {
+        "post_id": post.post_id,
+        "author_id": current.user_id,
+        "text_content": post.text_content,
+        "privacy_setting": post.privacy_setting,
+        "created_at": post.created_at,
+        "location": {
+            "location_id": location_id,
+            "location_type": location_type,
+        },
+        "file_ids": file_ids,
+    }
+
 
 
 @router.get("/post-locations", response_model=list[schemas.PostLocation])
@@ -1032,3 +1248,474 @@ def delete_event_participant(event_id: int, user_id: int, db: Session = Depends(
     obj = _get_composite_object(db, models.EventParticipant, {"event_id": event_id, "user_id": user_id})
     db.delete(obj)
     db.commit()
+
+
+# --- Users ---
+@router.get("/users/{user_id}")
+def get_user_profile(user_id: int, request: Request, db: Session = Depends(get_db)):
+    viewer = None
+    try:
+        viewer = get_current_user_from_cookie(request, db)
+    except HTTPException:
+        pass
+    user = db.query(models.User).filter(models.User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    profile = db.query(models.Profile).filter(models.Profile.user_id == user_id).first()
+    return {
+        "user_id": user.user_id,
+        "first_name": getattr(profile, "first_name", ""),
+        "last_name": getattr(profile, "last_name", ""),
+        "avatar_url": getattr(profile, "profile_picture_url", None),
+        "bio": getattr(profile, "bio", None),
+        "friendship_status": _friendship_status(db, getattr(viewer, "user_id", None), user_id),
+    }
+
+@router.put("/users/me")
+def update_me(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = get_current_user_from_cookie(request, db)
+    profile = db.query(models.Profile).filter(models.Profile.user_id == me.user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    for field in ["first_name", "last_name", "bio", "date_of_birth", "gender", "profile_picture_url", "cover_photo_url"]:
+        if field in payload:
+            setattr(profile, field, payload[field])
+    db.commit()
+    db.refresh(profile)
+    return {"message": "Update success", "data": payload}
+
+@router.get("/users/{user_id}/posts")
+def user_posts(user_id: int, request: Request, db: Session = Depends(get_db), limit: int = 10, offset: int = 0):
+    viewer = None
+    try:
+        viewer = get_current_user_from_cookie(request, db)
+    except HTTPException:
+        pass
+    viewer_id = getattr(viewer, "user_id", None)
+    is_friend = False
+    if viewer_id and viewer_id != user_id:
+        fr = _get_friendship_by_users(db, viewer_id, user_id)
+        is_friend = fr is not None and fr.status == models.FriendshipStatus.ACCEPTED
+    conds = [models.Post.author_id == user_id]
+    if viewer_id == user_id:
+        pass
+    elif is_friend:
+        conds.append(models.Post.privacy_setting.in_([models.PrivacySetting.PUBLIC, models.PrivacySetting.FRIENDS]))
+    else:
+        conds.append(models.Post.privacy_setting == models.PrivacySetting.PUBLIC)
+    posts = (
+        db.query(models.Post)
+        .filter(and_(*conds))
+        .order_by(desc(models.Post.created_at))
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return posts
+
+# --- Friends extras: cancel, block, list with pagination ---
+@router.delete("/friends/{target_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
+def cancel_friend_request(target_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    rec = _get_friendship_by_users(db, current.user_id, target_id)
+    if not rec or rec.status != models.FriendshipStatus.PENDING or rec.action_user_id != current.user_id:
+        raise HTTPException(status_code=404, detail="No pending request to cancel")
+    db.delete(rec)
+    db.commit()
+
+@router.post("/friends/{target_id}/block")
+def block_user(target_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    one, two = sorted([current.user_id, target_id])
+    rec = db.query(models.Friendship).filter(models.Friendship.user_one_id == one, models.Friendship.user_two_id == two).first()
+    if rec:
+        rec.status = models.FriendshipStatus.BLOCKED
+        rec.action_user_id = current.user_id
+    else:
+        rec = models.Friendship(
+            user_one_id=one,
+            user_two_id=two,
+            status=models.FriendshipStatus.BLOCKED,
+            action_user_id=current.user_id,
+        )
+        db.add(rec)
+    db.commit()
+    return {"message": "User blocked", "status": "BLOCKED"}
+
+@router.delete("/friends/{target_id}/block")
+def unblock_user(target_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    rec = _get_friendship_by_users(db, current.user_id, target_id)
+    if not rec or rec.status != models.FriendshipStatus.BLOCKED:
+        raise HTTPException(status_code=404, detail="No block found")
+    db.delete(rec)
+    db.commit()
+    return {"message": "Unblocked"}
+
+@router.get("/friends")
+def list_friends_v2(request: Request, db: Session = Depends(get_db), user_id: Optional[int] = None, limit: int = 50, offset: int = 0):
+    current = get_current_user_from_cookie(request, db)
+    target_id = user_id or current.user_id
+    q = db.query(models.Friendship).filter(
+        or_(models.Friendship.user_one_id == target_id, models.Friendship.user_two_id == target_id),
+        models.Friendship.status == models.FriendshipStatus.ACCEPTED,
+    ).offset(offset).limit(limit)
+    results = []
+    for f in q.all():
+        other = f.user_two_id if f.user_one_id == target_id else f.user_one_id
+        profile = db.query(models.Profile).filter(models.Profile.user_id == other).first()
+        user = db.query(models.User).filter(models.User.user_id == other).first()
+        results.append({
+            "user_id": other,
+            "name": ((getattr(profile, "first_name", "") or "") + " " + (getattr(profile, "last_name", "") or "")).strip(),
+            "avatar": getattr(profile, "profile_picture_url", None),
+        })
+    return results
+
+# --- Media upload (placeholder storage) ---
+@router.post("/media/upload", status_code=status.HTTP_201_CREATED)
+def upload_media(
+    file: UploadFile = FastAPIFile(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    # 1. Check login
+    user = get_current_user_from_cookie(request, db)
+
+    # 2. Đọc file
+    content = file.file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="INVALID_FILE")
+
+    # 3. Upload lên Cloudinary
+    unique_name = f"user_{user.user_id}_{uuid4().hex}"
+    try:
+        result = upload_to_cloudinary(content, unique_name)
+    finally:
+        file.file.close()
+
+    file_url = result["secure_url"]
+    file_size = result.get("bytes", len(content))
+    resource_type = result.get("resource_type", "raw")  # image, video, raw
+    mime_type = file.content_type or "application/octet-stream"
+
+    # 4. Lưu DB
+    rec = models.File(
+        uploader_user_id=user.user_id,
+        file_name=file.filename,
+        file_type=mime_type,
+        file_size=file_size,
+        file_url=file_url,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+
+    # 5. Xác định loại cho FE
+    kind = "FILE"
+    if resource_type == "image":
+        kind = "IMAGE"
+    elif resource_type == "video":
+        kind = "VIDEO"
+
+    return {
+        "file_id": rec.file_id,
+        "url": rec.file_url,
+        "type": rec.file_type,
+        "kind": kind,
+    }
+
+# --- Posts: share ---
+@router.post("/posts/{post_id}/share", status_code=status.HTTP_201_CREATED)
+def share_post(post_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    original = db.query(models.Post).filter(models.Post.post_id == post_id).first()
+    if not original:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if original.privacy_setting == models.PrivacySetting.ONLY_ME:
+        raise HTTPException(status_code=400, detail="PRIVACY_VIOLATION")
+    text_content = payload.get("text_content")
+    privacy = payload.get("privacy_setting", models.PrivacySetting.FRIENDS)
+    share = models.Post(
+        author_id=current.user_id,
+        author_type=models.PostAuthorType.USER,
+        text_content=text_content,
+        privacy_setting=privacy,
+        post_type=models.PostType.SHARE,
+        parent_post_id=original.parent_post_id or original.post_id,
+    )
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+    return {"post_id": share.post_id, "parent_post_id": share.parent_post_id}
+
+# --- Interactions: seen tracking ---
+@router.post("/interactions/seen")
+def mark_seen(payload: dict, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    post_ids = payload.get("post_ids") or []
+    # Assume a table USER_SEEN_POSTS exists; if not, skip DB insert and just echo.
+    try:
+        for pid in post_ids:
+            db.execute(
+                models.UserSeenPost.__table__.insert().prefix_with("IGNORE"),
+                {"user_id": current.user_id, "post_id": pid},
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+    return {"status": "synced"}
+
+# --- Groups ---
+@router.get("/groups/{group_id}")
+def get_group(group_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.user_id == current.user_id,
+        models.GroupMembership.group_id == group_id,
+    ).first()
+    return {
+        "group_id": group.group_id,
+        "name": group.group_name,
+        "privacy": group.privacy_type,
+        "my_status": getattr(membership, "status", None),
+        "my_role": getattr(membership, "role", None),
+    }
+
+@router.get("/groups/{group_id}/questions")
+def get_group_questions(group_id: int, db: Session = Depends(get_db)):
+    return db.query(models.MembershipQuestion).filter(models.MembershipQuestion.group_id == group_id).all()
+
+@router.post("/groups/{group_id}/join")
+def join_group(group_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    status_val = models.GroupMemberStatus.JOINED if group.privacy_type == models.GroupPrivacy.PUBLIC else models.GroupMemberStatus.PENDING
+    gm = models.GroupMembership(user_id=current.user_id, group_id=group_id, role=models.GroupMemberRole.MEMBER, status=status_val)
+    db.merge(gm)
+    db.commit()
+    answers = payload.get("answers") or []
+    for ans in answers:
+        rec = models.MembershipAnswer(user_id=current.user_id, group_id=group_id, question_id=ans["question_id"], answer_text=ans["answer_text"])
+        db.merge(rec)
+    db.commit()
+    return {"status": status_val.value, "message": "Request sent" if status_val == models.GroupMemberStatus.PENDING else "Joined"}
+
+@router.delete("/groups/{group_id}/leave")
+def leave_group(group_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    gm = db.query(models.GroupMembership).filter(models.GroupMembership.group_id == group_id, models.GroupMembership.user_id == current.user_id).first()
+    if gm:
+        db.delete(gm)
+        db.commit()
+    return {"status": "LEFT"}
+
+@router.get("/groups/{group_id}/feed")
+def group_feed(group_id: int, request: Request, db: Session = Depends(get_db), limit: int = 10, last_post_id: Optional[int] = None):
+    current = get_current_user_from_cookie(request, db)
+    group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.privacy_type == models.GroupPrivacy.PRIVATE:
+        gm = db.query(models.GroupMembership).filter(
+            models.GroupMembership.group_id == group_id,
+            models.GroupMembership.user_id == current.user_id,
+            models.GroupMembership.status == models.GroupMemberStatus.JOINED,
+        ).first()
+        if not gm:
+            raise HTTPException(status_code=403, detail="GROUP_NOT_JOINED")
+    query = (
+        db.query(models.Post)
+        .join(models.PostLocation, models.PostLocation.post_id == models.Post.post_id)
+        .filter(models.PostLocation.location_type == models.LocationType.GROUP, models.PostLocation.location_id == group_id)
+    )
+    if last_post_id:
+        query = query.filter(models.Post.post_id < last_post_id)
+    return query.order_by(desc(models.Post.created_at)).limit(limit).all()
+
+@router.get("/groups/{group_id}/members")
+def group_members(group_id: int, request: Request, db: Session = Depends(get_db), status_filter: Optional[models.GroupMemberStatus] = models.GroupMemberStatus.JOINED):
+    get_current_user_from_cookie(request, db)
+    q = db.query(models.GroupMembership).filter(models.GroupMembership.group_id == group_id)
+    if status_filter:
+        q = q.filter(models.GroupMembership.status == status_filter)
+    return q.all()
+
+@router.put("/groups/{group_id}/members/{user_id}")
+def update_group_member(group_id: int, user_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    admin = get_current_user_from_cookie(request, db)
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission")
+    gm = db.query(models.GroupMembership).filter(models.GroupMembership.group_id == group_id, models.GroupMembership.user_id == user_id).first()
+    if not gm:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    if "status" in payload:
+        gm.status = payload["status"]
+    db.commit()
+    db.refresh(gm)
+    return {"status": gm.status}
+
+# --- Pages ---
+@router.get("/pages/{page_id}")
+def get_page(page_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    page = db.query(models.Page).filter(models.Page.page_id == page_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    role = db.query(models.PageRole).filter(models.PageRole.user_id == current.user_id, models.PageRole.page_id == page_id).first()
+    follow = db.query(models.PageFollow).filter(models.PageFollow.user_id == current.user_id, models.PageFollow.page_id == page_id).first()
+    return {"page_id": page.page_id, "name": page.page_name, "is_followed": bool(follow), "my_role": getattr(role, "role", None)}
+
+@router.post("/pages/{page_id}/follow")
+def follow_page(page_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    db.merge(models.PageFollow(user_id=current.user_id, page_id=page_id))
+    db.commit()
+    return {"status": "FOLLOWED"}
+
+@router.delete("/pages/{page_id}/follow")
+def unfollow_page(page_id: int, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    rec = db.query(models.PageFollow).filter(models.PageFollow.user_id == current.user_id, models.PageFollow.page_id == page_id).first()
+    if rec:
+        db.delete(rec)
+        db.commit()
+    return {"status": "UNFOLLOWED"}
+
+@router.get("/pages/{page_id}/posts")
+def page_posts(page_id: int, db: Session = Depends(get_db), limit: int = 10, last_post_id: Optional[int] = None):
+    q = db.query(models.Post).join(models.PostLocation, models.PostLocation.post_id == models.Post.post_id).filter(
+        models.PostLocation.location_type == models.LocationType.PAGE_TIMELINE,
+        models.PostLocation.location_id == page_id,
+    )
+    if last_post_id:
+        q = q.filter(models.Post.post_id < last_post_id)
+    return q.order_by(desc(models.Post.created_at)).limit(limit).all()
+
+@router.get("/pages/{page_id}/roles")
+def page_roles(page_id: int, request: Request, db: Session = Depends(get_db)):
+    admin = get_current_user_from_cookie(request, db)
+    admin_role = db.query(models.PageRole).filter(models.PageRole.user_id == admin.user_id, models.PageRole.page_id == page_id, models.PageRole.role == models.PageRoleEnum.ADMIN).first()
+    if not admin_role:
+        raise HTTPException(status_code=403, detail="No permission")
+    return db.query(models.PageRole).filter(models.PageRole.page_id == page_id).all()
+
+@router.post("/pages/{page_id}/roles")
+def assign_page_role(page_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    admin = get_current_user_from_cookie(request, db)
+    admin_role = db.query(models.PageRole).filter(models.PageRole.user_id == admin.user_id, models.PageRole.page_id == page_id, models.PageRole.role == models.PageRoleEnum.ADMIN).first()
+    if not admin_role:
+        raise HTTPException(status_code=403, detail="No permission")
+    user = db.query(models.User).filter(models.User.email == payload["email"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    rec = models.PageRole(user_id=user.user_id, page_id=page_id, role=payload["role"])
+    db.merge(rec)
+    db.commit()
+    return {"message": "Role assigned"}
+
+@router.delete("/pages/{page_id}/roles/{user_id}")
+def remove_page_role(page_id: int, user_id: int, request: Request, db: Session = Depends(get_db)):
+    admin = get_current_user_from_cookie(request, db)
+    admin_role = db.query(models.PageRole).filter(models.PageRole.user_id == admin.user_id, models.PageRole.page_id == page_id, models.PageRole.role == models.PageRoleEnum.ADMIN).first()
+    if not admin_role:
+        raise HTTPException(status_code=403, detail="No permission")
+    rec = db.query(models.PageRole).filter(models.PageRole.user_id == user_id, models.PageRole.page_id == page_id).first()
+    if rec:
+        db.delete(rec)
+        db.commit()
+    return {"message": "Role removed"}
+
+@router.get("/me/pages")
+def my_pages(request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    roles = db.query(models.PageRole, models.Page).join(models.Page, models.Page.page_id == models.PageRole.page_id).filter(models.PageRole.user_id == current.user_id).all()
+    return [{"page_id": p.page_id, "name": p.page_name, "role": pr.role} for pr, p in roles]
+
+# --- Events ---
+@router.post("/events/{event_id}/rsvp")
+def rsvp_event(event_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    status_val = payload.get("status")
+    rec = models.EventParticipant(event_id=event_id, user_id=current.user_id, rsvp_status=status_val)
+    db.merge(rec)
+    db.commit()
+    return {"status": status_val}
+
+@router.get("/events/{event_id}/participants")
+def event_participants(event_id: int, db: Session = Depends(get_db), status_filter: Optional[models.RSVPStatus] = None):
+    q = db.query(models.EventParticipant).filter(models.EventParticipant.event_id == event_id)
+    if status_filter:
+        q = q.filter(models.EventParticipant.rsvp_status == status_filter)
+    return q.all()
+
+@router.get("/events")
+def list_events(request: Request, db: Session = Depends(get_db), type: Optional[str] = None):
+    current = get_current_user_from_cookie(request, db)
+    if type == "HOSTING":
+        return db.query(models.Event).filter(models.Event.host_id == current.user_id).all()
+    if type == "GOING":
+        eps = db.query(models.EventParticipant).filter(models.EventParticipant.user_id == current.user_id).all()
+        ids = [e.event_id for e in eps]
+        return db.query(models.Event).filter(models.Event.event_id.in_(ids)).all()
+    return db.query(models.Event).all()
+
+# --- Reports & admin ---
+@router.get("/reports/reasons")
+def report_reasons(db: Session = Depends(get_db)):
+    return db.query(models.ReportReason).all()
+
+@router.post("/reports", status_code=status.HTTP_201_CREATED)
+def create_report(payload: dict, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    if payload.get("target_type") == models.ReportableType.POST and payload.get("target_id") == current.user_id:
+        raise HTTPException(status_code=400, detail="Cannot report own content")
+    rec = models.Report(
+        reporter_user_id=current.user_id,
+        reportable_id=payload["target_id"],
+        reportable_type=payload["target_type"],
+        reason_id=payload["reason_id"],
+        status=models.ReportStatus.PENDING,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return {"report_id": rec.report_id, "message": "Thanks for reporting"}
+
+@router.get("/admin/reports")
+def admin_reports(request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    role = db.query(models.UserRole).filter(models.UserRole.user_id == current.user_id).first()
+    if not role:
+        raise HTTPException(status_code=403, detail="Not admin")
+    return db.query(models.Report).filter(models.Report.status == models.ReportStatus.PENDING).all()
+
+@router.post("/admin/reports/{report_id}/resolve")
+def resolve_report(report_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    role = db.query(models.UserRole).filter(models.UserRole.user_id == current.user_id).first()
+    if not role:
+        raise HTTPException(status_code=403, detail="Not admin")
+    report = db.query(models.Report).filter(models.Report.report_id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    action = models.ReportAction(
+        report_id=report_id,
+        reviewer_admin_id=current.user_id,
+        action_taken=payload["action_taken"],
+        notes=payload.get("notes"),
+    )
+    report.status = models.ReportStatus.ACTION_TAKEN
+    db.add(action)
+    db.commit()
+    return {"status": "RESOLVED"}
+
