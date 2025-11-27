@@ -1,72 +1,51 @@
-import React, { createContext, useContext, useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import authService from '../services/authService'
-import { registerUnauthorizedHandler } from '../services/api'
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { login as loginApi, register as registerApi, getMe } from '../services/api';
 
-const AuthContext = createContext()
+const AuthContext = createContext();
 
-export function AuthProvider({ children }){
-  const [user, setUser] = useState(null)
-  const [isInitializing, setIsInitializing] = useState(true)
-  const navigate = useNavigate()
+export function useAuth() { return useContext(AuthContext); }
 
-  useEffect(()=>{
-    // register global 401 handler: clear user state when backend returns 401
-    registerUnauthorizedHandler(()=>{
-      setUser(null)
-    })
+export function AuthProvider({ children }) {
+    const [user, setUser] = useState(null);
+    const [loading, setLoading] = useState(true);
 
-    async function loadMe(){
-      setIsInitializing(true)
-      try{
-        const res = await authService.getMe()
-        // The backend should return user object on successful session
-        setUser(res.data)
-      }catch(e){
-        // 401 or other errors -> leave as guest
-        setUser(null)
-      }finally{
-        setIsInitializing(false)
-      }
-    }
-    loadMe()
-  },[])
+    // Load user nếu đã có token
+    useEffect(() => {
+        const token = localStorage.getItem('token');
+        if (token) {
+            getMe()
+                .then(res => setUser(res.data)) // API trả về { user_id, email... }
+                .catch(() => localStorage.removeItem('token'))
+                .finally(() => setLoading(false));
+        } else {
+            setLoading(false);
+        }
+    }, []);
 
-  const login = async (credentials)=>{
-    const res = await authService.login(credentials)
-    // backend sets HttpOnly cookie; response includes user info
-    if(res.data && res.data.user){
-      setUser(res.data.user)
-      navigate('/')
-    }
-    return res
-  }
+    const login = async (email, password) => {
+        const res = await loginApi(email, password);
+        // API trả về { token: "..." }
+        if (res.data.token) {
+            localStorage.setItem('token', res.data.token);
+            const userRes = await getMe(); // Lấy info user ngay sau khi có token
+            setUser(userRes.data);
+            return true;
+        }
+        return false;
+    };
 
-  const register = async (payload)=>{
-    const res = await authService.register(payload)
-    // If backend logs in user on register and returns user, set it
-    if(res.data && res.data.user){
-      setUser(res.data.user)
-      navigate('/')
-    }
-    return res
-  }
+    const register = async (data) => {
+        return registerApi(data);
+    };
 
-  const logout = async ()=>{
-    try{
-      await authService.logout()
-    }catch(e){ /* ignore */ }
-    setUser(null)
-    navigate('/login')
-  }
+    const logout = () => {
+        localStorage.removeItem('token');
+        setUser(null);
+    };
 
-  return (
-    <AuthContext.Provider value={{user, isInitializing, login, register, logout}}>
-      {children}
-    </AuthContext.Provider>
-  )
-}
-
-export function useAuth(){
-  return useContext(AuthContext)
+    return (
+        <AuthContext.Provider value={{ user, login, register, logout, loading }}>
+            {children}
+        </AuthContext.Provider>
+    );
 }
