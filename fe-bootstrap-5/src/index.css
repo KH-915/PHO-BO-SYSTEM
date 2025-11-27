@@ -1,0 +1,12 @@
+:root{
+  --fb-blue: #1877F2;
+  --bg: #F0F2F5;
+  --card-bg: #fff;
+  --text-main: #050505;
+  --text-secondary: #65676B;
+}
+body{background:var(--bg);}
+.container-centered{max-width:980px;margin:24px auto}
+.card-rounded{border-radius:8px}
+.btn-pill{border-radius:6px}
+.input-pill{border-radius:20px}

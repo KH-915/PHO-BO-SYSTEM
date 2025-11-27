@@ -1,0 +1,694 @@
+,,,,,,,,,
+,METHOD,API,DESCRIPTION,NOTE FE,FE,REQUEST BODY,NOTE BE,BE,RESPONSE
+,Authentication & Identity (Core),,,,,,,,
+,POST,/api/v1/auth/register,Đăng ký tài khoản mới,"Cần validate format email, pass, phone trước khi gửi",Null,"{ 
+""email"": ""user@ex.com"", 
+""password"": ""raw_pass"",
+""phone_number"": ""098..."", 
+""first_name"": ""Nguyen"", 
+""last_name"": ""Khanh"", 
+""date_of_birth"": ""30-01-2005"", 
+""gender"": ""MALE"" 
+}","1. Kiểm tra email trong USERS
+2. Kiểm tra phone_number trong USERS
+2. Hash password (bcrypt)
+3. Insert vào USERS & PROFILES tương ứng (1-1) ",Null,"- 201 Created 
+{ 
+""message"": ""Đăng ký thành công"",
+""user_id"": 10
+}
+- 409 Conflict
+{
+""error_code"": ""EMAIL_EXIST"",
+""message"" : ""Email đã được sử dụng""
+}
+- 409 Conflict
+{
+""error_code"" ""PHONE_EXIST"",
+""message"": ""Số điện thoại đã được sử dụng""
+}"
+,POST,/api/v1/auth/login,Đăng nhập hệ thống,Lưu access_token vào cookie,Null,"{ 
+""email"": ""user@ex.com"", 
+""password"": ""raw_pass"" 
+}","1. Tìm user theo email.
+2. Nếu không thấy -> Lỗi.
+3. Compare hash password. Nếu sai -> Lỗi.
+4. Nếu đúng: Gen JWT Token.",Null,"- 200 OK:
+{ 
+""access_token"": ""ey..."", 
+""token_type"": ""Bearer"", 
+""expires_in"": 3600, 
+""user"": 
+{ 
+""id"": 10, 
+""name"": ""Khanh Nguyen"", 
+""avatar"": ""url"" 
+} 
+}
+- 401 Unauthorized:
+{
+""message"": ""Email hoặc mật khẩu không chính xác"" 
+}"
+,GET,/api/v1/users/me,Lấy thông tin cá nhân của người dùng đang đăng nhập,Dùng để render Header Profile & Form Edit,Null,None,Query bảng USER join PROFILES,Null,"200 OK:
+{ 
+""user_id"": 1, 
+""first_name"": ""..."", 
+""last_name"": ""..."", 
+""profile_picture_url"": ""..."", 
+""cover_photo_url"": ""..."", 
+""bio"": ""..."", 
+""date_of_birth"": ""..."", 
+""gender"": ""..."" 
+}"
+,GET,/api/v1/users/:id,Xem profile người khác,"Cần hiển thị nút: ""Add freind"", ""Unfreind"", ""Cancel Request"" hoặc ""Edit profile"" tùy mối quan hệ",Null,None,"1. Query PROFILES.
+2. Check bảng FRIENDSHIPS để xem mối quan hệ giữa me và :id.",Null,"- 200 OK:
+{ ""user_id"": 99, 
+""first_name"": ""Nam"", 
+""avatar_url"": ""..."", 
+""bio"": ""..."", 
+""friendship_status"": ""FRIEND"" // hoặc ""PENDING"", ""NONE"", ""BLOCKED"" 
+}
+404 Not Found: (Nếu user không tồn tại)"
+,PUT,/api/v1/users/me,Cập nhật thông tin cá nhân,Gửi lên các trường thay đổi,Null,"{ 
+""first_name"": ""Khanh"", 
+""last_name"": ""Nguyen"", 
+""bio"": ""New Bio"", 
+""date_of_birth"": ""30-03-2006"", 
+""gender"": ""MALE"", 
+""profile_picture_url"": ""http://..."", 
+""cover_photo_url"": ""http://..."" 
+}",Update bảng PROFILES. Không cho đổi email/phone ở API này,Null,"200 OK:
+{ 
+""message"": ""Update success"", 
+""data"": { ""first_name"": ""Khanh"", ... } 
+}"
+,GET,/api/v1/users/:id/posts,Lấy danh sách bài đăng thuộc sở hữu của user (gồm bài tự viết và bài Share).,"Phân biệt UI:
+- Nếu :id == me: Hiển thị nút Edit/Delete.
+- Nếu :id != me: Không hiện nút thao tác.
+Scroll:
+?limit=10&offset=0",Null,"Query Params:
+limit: số lượng
+offset: vị trí
+(Không cần Body)","Lấy viewer_id từ AccessToken, id ở query param
+1. Core Query:
+Query bảng POSTS với điều kiện tiên quyết: WHERE author_id = :id.
+2. Privacy Filter (Lớp bảo vệ):
+- Nếu viewer_id == :id (Xem chính mình): Lấy ALL (PUBLIC, FRIENDS, ONLY_ME).
+- Nếu viewer_id là bạn bè của :id: Lấy PUBLIC + FRIENDS.
+- Nếu là người lạ: Chỉ lấy PUBLIC.
+3. Populate:
+- Join POST_FILES để lấy media.
+- Nếu post_type='SHARE', cần join đệ quy để lấy thông tin bài gốc (parent_post_id).",Null,"200 OK:
+[
+  {
+    ""post_id"": 101,
+    ""author"": { ""id"": 1, ""name"": ""Khanh"", ""avatar"": ""..."" },
+    ""content"": ""My thoughts..."",
+    ""privacy"": ""FRIENDS"",
+    ""type"": ""ORIGINAL"",
+    ""files"": [ ... ],
+    ""stats"": { ""likes"": 5, ""comments"": 2 }
+  },
+  {
+    ""post_id"": 102,
+    ""author"": { ""id"": 1, ""name"": ""Khanh"" },
+    ""type"": ""SHARE"",
+    ""original_post"": {
+      ""id"": 50,
+      ""author"": ""Mr. A"",
+      ""content"": ""Original content""
+    }
+  }
+]"
+,Social Graph (Freindships),,,,,,,,
+,GET,/api/v1/friends/requests,Xem danh sách lời mời kết bạn đang chờ (Incoming Requests).,"Render list thông báo/lời mời. Cần hiển thị nút ""Accept"" và ""Reject"".",Null,(None),"Query: SELECT * FROM friendships WHERE status='PENDING' AND action_user_id != me AND (user_one_id=me OR user_two_id=me). 
+
+ Giải thích: Lấy record PENDING mà người hành động không phải là mình (tức là người khác gửi tới).",Null,"200 OK: 
+
+ [{ ""friendship_id"": 1, ""requester"": { ""id"": 10, ""name"": ""Nam"", ""avatar"": ""..."" }, ""created_at"": ""..."" }]"
+,POST,/api/v1/friends/:target_user_id,Gửi lời mời kết bạn (Send Request).,"Nút ""Add Friend"" trên profile người khác.",Null,(None),"1. Validate ID: id1 = min(me, target), id2 = max(me, target). 
+
+ 2. Check Exist: Query WHERE user_one_id=id1 AND user_two_id=id2. 
+
+ - Nếu có và status='BLOCKED': Trả lỗi (Không thể kết bạn). 
+
+ - Nếu có và status='ACCEPTED': Trả lỗi (Đã là bạn). 
+
+ - Nếu có và status='PENDING': Trả lỗi (Đang chờ duyệt). 
+
+ 3. Action: INSERT INTO friendships (user_one_id, user_two_id, action_user_id, status) VALUES (id1, id2, me, 'PENDING').",Null,"201 Created: 
+
+ { ""message"": ""Request sent"", ""status"": ""PENDING"" } 
+
+
+ 400 Bad Request: 
+
+ { ""code"": ""ALREADY_SENT"", ""message"": ""Yêu cầu đang chờ xử lý"" }"
+,PUT,/api/v1/friends/:target_user_id/accept,Chấp nhận lời mời kết bạn từ target_user_id.,Dùng được ở cả trang List Request (lấy ID người gửi) và trang Profile.,Null,(None),"1. Lookup:
+- id1 = min(me, target), id2 = max(me, target).
+- Query SELECT * FROM friendships WHERE user_one_id=id1 AND user_two_id=id2.
+
+2. Validate:
+- Record phải tồn tại.
+- status phải là 'PENDING'.
+- action_user_id KHÔNG được là me (tức là người kia gửi, mình mới accept được).
+
+3. Action: Update status='ACCEPTED', action_user_id=me.",Null,"200 OK:
+{ ""message"": ""Friend request accepted"", ""status"": ""ACCEPTED"" }
+
+404 Not Found: (Không tìm thấy lời mời)"
+,DELETE,/api/v1/friends/:target_user_id/reject,Từ chối lời mời từ target_user_id,"Nút ""Delete Request"" hoặc ""Decline"".",Null,(None),"1. Lookup: Tương tự như Accept (min/max id).
+
+2. Validate:
+- Record tồn tại.
+- status là 'PENDING'.
+- action_user_id != me.
+
+3. Action: DELETE record đó khỏi bảng FRIENDSHIPS.",Null,"200 OK:
+{ ""message"": ""Friend request rejected"" }"
+,DELETE,/api/v1/friends/:id/cancel,Hủy lời mời đã gửi (Undo request).,"Nút ""Cancel Request"" trên profile người mình vừa add.",Null,(None),"Validate: status='PENDING' và action_user_id == me. 
+
+ Action: Xóa record.",Null,"200 OK: 
+ { ""message"": ""Request cancelled"" }"
+,DELETE,/api/v1/friends/:target_user_id,Hủy kết bạn (Unfriend).,"Nút ""Unfriend"" trên profile bạn bè. Dùng target_user_id tiện hơn request_id.",Null,(None),"1. Validate ID: Tìm record giữa me và target (nhớ logic min/max id). 
+
+ 2. Action: Xóa record FRIENDSHIPS.",Null,"200 OK: 
+ { ""message"": ""Unfriended success"" }"
+,GET,/api/v1/friends,Lấy danh sách bạn bè hiện tại.,"Tab ""Friends"" trên profile. Có thể thêm ?user_id= để xem bạn của người khác.",Null,"Query Params: user_id (optional), limit, offset.","Query: SELECT * FROM friendships WHERE status='ACCEPTED' AND (user_one_id=target OR user_two_id=target). 
+
+ Join: Join bảng USERS/PROFILES để lấy thông tin người bạn (người còn lại trong cặp user_one/user_two).",Null,"200 OK: 
+ [{ ""user_id"": 55, ""name"": ""Hung"", ""avatar"": ""..."", ""mutual_friends"": 10 }]"
+,POST,/api/v1/friends/:target_user_id/block,Chặn người dùng.,"Nút ""Block"" trong menu context.",Null,(None),"Logic: 
+
+ 1. Tìm record giữa 2 user (min/max). 
+
+ 2. Nếu chưa có: Insert status='BLOCKED', action_user_id=me. 
+
+ 3. Nếu đang là Friend/Pending: Update status='BLOCKED', action_user_id=me. 
+
+ Lưu ý: User bị block sẽ không gửi được request, không thấy bài đăng.",Null,"200 OK: 
+ { ""message"": ""User blocked"", ""status"": ""BLOCKED"" }"
+,DELETE,/api/v1/friends/:target_user_id/block,Bỏ chặn.,"Tab ""Blocked Users"" trong Setting.",Null,(None),Logic: Xóa record có status='BLOCKED' giữa 2 user.,Null,"200 OK: 
+ { ""message"": ""Unblocked"" }"
+,Content Engine (Posts & Media),,,,,,,,
+,POST,/api/v1/media/upload,Upload file (ảnh/video) lên hệ thống.,Step 1: Gọi API này trước khi tạo Post. Gửi file binary.,Null,"FormData: 
+
+ file: (binary content)","1. Validate: Check loại file (ảnh/video) và dung lượng. 
+
+ 2. Storage: Upload lên Cloud (S3/MinIO). 
+
+ 3. DB: Insert vào bảng FILES.",Null,"201 Created: 
+ { ""file_id"": 101, ""url"": ""..."", ""type"": ""image/jpeg"" } 
+
+
+ 400 Bad Request: 
+ { ""code"": ""INVALID_FILE"", ""message"": ""File too large or invalid type"" }"
+,POST,/api/v1/posts,"Tạo bài viết mới. Hệ thống tự động xác định người đăng (Author) và vị trí đăng (Location) dựa trên ngữ cảnh được gửi lên. Hỗ trợ đăng lên Tường nhà, Group, hoặc Tường Page (dưới tư cách Page).","Step 2: 
+Gửi file_ids nhận được từ Step 1. 
+
+Step 3: 
+Frontend cần xác định người dùng ""đang đứng ở đâu"" để gửi target_type và target_id chính xác.
+
+Logic UI:
+Nếu đang ở Trang chủ/Profile cá nhân: Gửi target_type=""USER"", target_id=user_id.
+Nếu đang ở Group: Gửi target_type=""GROUP"", target_id=group_id.
+Nếu đang ở Page: Gửi target_type=""PAGE"", target_id=page_id.
+Phần upload ảnh/video phải gọi API /media/upload trước để lấy file_ids.",Null,"{
+  // --- NỘI DUNG ---
+  ""text_content"": ""Chào ngày mới!"",
+  ""file_ids"": [101, 102],
+  ""privacy_setting"": ""PUBLIC"",
+
+  // --- NGỮ CẢNH (Context Routing) ---
+  ""target_type"": ""USER"",  // Enum: ""USER"", ""GROUP"", ""PAGE""
+  ""target_id"": 123        // ID đích (User ID, Group ID, hoặc Page ID)
+}","Bước 1: Validate Input
+1.1. Kiểm tra Rỗng: Nếu text_content rỗng VÀ file_ids rỗng -> Trả lỗi 400 Bad Request.
+1.2. Kiểm tra Privacy: Value phải thuộc ENUM trong DB.
+
+Bước 2: Phân giải Quyền, Tác giả & Vị trí (Resolution)
+Dựa vào target_type, Backend xác định 3 biến số: final_author_id, final_author_type, final_location_type.
+
+CASE 1: Đăng lên PAGE (target_type == ""PAGE"")
+- Ý nghĩa: Đăng bài lên tường Page dưới tư cách Admin của Page đó.
+2.1.1. Check Quyền: Query bảng PAGE_ROLES. Kiểm tra xem current_user_id có role ADMIN hoặc EDITOR tại Page target_id không?.
+    2.1.1.a. Nếu không -> Lỗi 403 Forbidden.
+2.1.2. Set Author: author_type = 'PAGE', author_id = target_id (Page đăng).
+2.1.3. Set Location: location_type = 'PAGE_TIMELINE', location_id = target_id.
+
+CASE 2: Đăng vào GROUP (target_type == ""GROUP"")
+Ý nghĩa: User đăng bài thảo luận trong Group.
+2.2.1. Check Quyền: Query bảng GROUP_MEMBERSHIPS. Kiểm tra xem current_user_id có status là JOINED tại Group target_id không?.
+    2.2.1.a.Nếu không (Pending/Banned/None) -> Lỗi 403 Forbidden.
+2.2.2. Set Author: author_type = 'USER', author_id = current_user_id.
+2.2.3. Set Location: location_type = 'GROUP', location_id = target_id.
+
+CASE 3: Đăng lên USER Timeline (target_type == ""USER"")
+- Ý nghĩa: Đăng status lên tường nhà mình.
+2.3.1. Check Logic:
+    2.3.1.a. Nếu target_id == current_user_id: Hợp lệ.
+    2.3.1.b. Nếu target_id != current_user_id: Tạm thời chặn (hoặc check logic ""Wall Post"" nếu bạn mở rộng sau này).
+2.3.2. Set Author: author_type = 'USER', author_id = current_user_id.
+2.3.3. Set Location: location_type = 'USER_TIMELINE', location_id = target_id.
+
+Bước 3: Transaction (Ghi dữ liệu)
+Thực hiện trong 1 transaction để đảm bảo toàn vẹn.
+
+3.1. Insert POSTS:
+author_id, author_type (Lấy từ bước 2).
+post_type = 'ORIGINAL'.
+
+3.2. Insert POST_LOCATIONS:
+location_id = target_id.
+location_type (Lấy từ bước B: USER_TIMELINE / GROUP / PAGE_TIMELINE).
+
+3.3. Insert POST_FILES (Nếu có):
+Loop qua mảng file_ids, insert kèm display_order.",Null,"201 Created: 
+{
+  ""message"": ""Post created successfully"",
+  ""data"": {
+    ""post_id"": 500,
+    ""created_at"": ""2025-10-27T10:30:00Z"",
+    ""text_content"": ""Chào ngày mới!"",
+    ""author"": { ""id"": 123, ""type"": ""PAGE"", ""name"": ""Hội Yêu Mèo"", ""avatar_url"": ""..."" },
+    ""location"": { ""type"": ""PAGE_TIMELINE"", ""id"": 123 },
+    ""files"": [ 101, 102 ]
+  }
+}
+
+
+400 Bad Request: { ""code"": ""EMPTY_CONTENT"", ""message"": ""Post must have text or media"" }
+
+403 Forbidden: { ""code"": ""PAGE_ACCESS_DENIED"", ""message"": ""You are not admin of this page"" }
+
+403 Forbidden: { ""code"": ""GROUP_NOT_JOINED"", ""message"": ""You must join group to post"" }"
+,POST,/api/v1/posts/:id/share,Chia sẻ bài viết (Share Post).,Hiển thị dialog nhập caption mới. Không cho đính kèm file mới.,Null,"{ ""text_content"": ""Look!"", ""privacy_setting"": ""FRIENDS"" }","1. Nested Check: Nếu :id là bài Share -> Lấy parent_post_id gốc.
+2. Privacy Check: Privacy bài Share không được rộng hơn bài Gốc.
+3. Action: Insert POSTS (type='SHARE'). Mặc định đăng lên USER_TIMELINE.",Null,"201 Created: 
+ { ""post_id"": 501, ""parent_post_id"": 500 } 
+
+ 400 Bad Request: 
+ { ""code"": ""PRIVACY_VIOLATION"", ""message"": ""Cannot share strictly private post"" }"
+,GET,/api/v1/feed,"Lấy danh sách bài viết tổng hợp từ bạn bè, nhóm và trang, loại bỏ các bài đã xem.","Param
+limit (int): Số lượng bài viết (Default: 10).
+last_post_id(int): Cursor cho Scroll Down: ID của bài viết cuối cùng user nhìn thấy ở trang trước. Backend sẽ lấy các bài có ID nhỏ hơn (cũ hơn) bài này.
+after_post_id(int): Cursor cho Pull-to-Refresh: ID của bài viết đầu tiên (mới nhất) user đang thấy. Backend sẽ lấy các bài có ID lớn hơn (mới hơn) bài này.
+
+1. Logic Scroll:
+- Lần đầu load: Không gửi last_post_id.
+- Scroll xuống đáy: Lấy post_id của bài cuối cùng gửi lên last_post_id.
+2. Logic Refresh:
+- Kéo từ trên xuống: Lấy post_id của bài đầu tiên gửi lên after_post_id.
+3. UI State:
+- Nếu response trả về mảng rỗng [] -> Hiển thị ""You're all caught up!"" (Đã xem hết tin).",Null,(None),"Bước 1: Chuẩn bị dữ liệu (ID Lists)
+Lấy danh sách ID liên quan đến User hiện tại:
+- friend_ids: Từ bảng FRIENDSHIPS (status='ACCEPTED') .
+- group_ids: Từ bảng GROUP_MEMBERSHIPS (status='JOINED') .
+- page_ids: Từ bảng PAGE_FOLLOWS.
+
+Bước 2: Xây dựng Query (LEFT JOIN Strategy)
+Query bảng POSTS (p) join POST_LOCATIONS (pl).
+LEFT JOIN user_seen_posts usp ON p.post_id = usp.post_id AND usp.user_id = :me
+
+Bước 3: Apply Filters (WHERE Clause)
+Điều kiện tiên quyết: usp.post_id IS NULL (Chưa xem) AND p.deleted_at IS NULL.
+VÀ thoả mãn 1 trong các điều kiện nguồn:
+1. Bài Bạn Bè: pl.location_type='USER_TIMELINE' AND p.author_id IN friend_ids AND p.privacy != 'ONLY_ME'.
+2. Bài Nhóm: pl.location_type='GROUP' AND pl.location_id IN group_ids. (Lưu ý Constraint 1.3.3.2: User phải join nhóm mới xem được ).
+3. Bài Page: pl.location_type='PAGE_TIMELINE' AND p.author_id IN page_ids.
+4. Bài Của Mình: p.author_id = me.
+
+Bước 4: Pagination
+- Nếu có last_post_id: AND p.post_id < :last_post_id.
+- Nếu có after_post_id: AND p.post_id > :after_post_id.
+
+Bước 5: Sort & Limit
+ORDER BY p.post_id DESC LIMIT :limit.",Null,"200 OK:
+{
+""data"": [
+{
+""post_id"": 500,
+""author"": { ""id"": 10, ""name"": ""Nam"", ""avatar"": ""..."" },
+""content"": ""Hello"",
+""files"": [...],
+""stats"": { ""likes"": 5, ""comments"": 2 },
+""location"": { ""type"": ""GROUP"", ""name"": ""IT Club"" }
+},
+...
+],
+""pagination"": {
+""next_cursor"": 490,
+""has_more"": true
+}
+}"
+,GET,/api/v1/posts/:id,Xem chi tiết 1 bài viết.,Xử lý UI nếu original_post trả về UNAVAILABLE.,Null,(None),"1. Populate: Join POST_FILES, USERS.
+2. Logic Share: Nếu là bài Share, query parent_post. Nếu parent bị Soft Delete hoặc Privacy chặn -> Trả status UNAVAILABLE trong object original_post.",Null,"200 OK: 
+ { ""post_id"": 500, ""content"": ""..."" } 
+
+ 200 OK (Share Error): 
+ { ""post_id"": 501, ""type"": ""SHARE"", ""original_post"": { ""status"": ""UNAVAILABLE"" } }"
+,PUT,/api/v1/posts/:id,Chỉnh sửa bài viết.,Chỉ cho sửa text và privacy.,Null,"{ ""text_content"": ""Edit"", ""privacy_setting"": ""ONLY_ME"" }","1. Permission Check:
+- Nếu author_type='USER': Check author_id == me.
+- Nếu author_type='PAGE': Check PAGE_ROLES (Admin/Editor) của Page đó.
+
+2. Validate: Không xóa hết text nếu không có file.",Null,"200 OK:
+{ ""message"": ""Updated"" }
+
+403 Forbidden:
+{ ""message"": ""No permission"" }"
+,DELETE,/api/v1/posts/:id,Xóa bài viết.,Xóa khỏi timeline ngay lập tức.,Null,(None),"1. Permission Check: Tương tự API Edit (Check User chính chủ hoặc Admin Page).
+2. Action: Soft Delete (UPDATE posts SET deleted_at = NOW()).",Null,"200 OK: 
+ { ""message"": ""Post moved to trash"" }"
+,Interactions,,,,,,,,
+,POST,/api/v1/comments,Tạo bình luận mới hoặc trả lời bình luận (Reply).,"Logic Reply:
+- Nếu comment vào bài: gửi parent_comment_id = null.
+- Nếu trả lời comment khác: gửi ID của comment đó vào parent_comment_id.",Null,"{
+ ""target_type"": ""POST"", 
+ ""target_id"": 500,
+ ""text_content"": ""Hay quá!"",
+ ""parent_comment_id"": null
+}","1. Validate Permission: User phải có quyền xem target_id (Post/File) thì mới được comment.
+
+2. Validate Reply: Nếu có parent_comment_id, BE phải check xem parent comment đó có thuộc cùng target_id không.
+
+3. Insert: Bảng COMMENTS.",Null,"201 Created:
+{
+ ""comment_id"": 888,
+ ""created_at"": ""..."",
+ ""commenter"": { ... }
+}"
+,GET,/api/v1/comments,Lấy danh sách bình luận.,"Phân trang: Scroll comment nên dùng offset & limit truyền thống (vì comment ít bị trôi nhanh như Feed).
+
+UI Tree: FE tự gom nhóm reply dựa vào parent_comment_id.",Null,"Query Params:
+target_type=POST
+target_id=500
+limit=10
+offset=0","Query: SELECT * FROM comments WHERE commentable_type = :type AND commentable_id = :id ORDER BY created_at ASC.
+Join bảng User để lấy tên/avatar người comment luôn.",Null,"200 OK:
+[
+ {
+ ""comment_id"": 888,
+ ""text"": ""ABC"",
+ ""parent_id"": null
+ },
+ {
+ ""comment_id"": 889,
+ ""text"": ""Reply ABC"",
+ ""parent_id"": 888
+ }
+]"
+,PUT,/api/v1/comments/:id,Sửa nội dung bình luận.,Chỉ người viết mới sửa được.,Null,"{ ""text_content"": ""Nội dung đã sửa"" }","1. Auth: Check commenter_user_id == me.
+2. Action: Update text_content, updated_at.",Null,"200 OK:
+{ ""message"": ""Updated"" }"
+,DELETE,/api/v1/comments/:id,Xóa bình luận.,"Quyền xóa:
+1. Người viết comment.
+2. Chủ của bài viết (Author Post) - có quyền xóa mọi comment trong bài mình.",Null,(None),"1. Check Auth: User là commenter HOẶC User là post_owner.
+2. Action: Delete (Soft delete), update deleted_at = Now()
+Lưu ý: Nếu xóa comment cha, cần xử lý ẩn luôn các comment con (reply).",Null,"200 OK:
+{ ""message"": ""Deleted"" }"
+,POST,/api/v1/reactions,"Thả cảm xúc (Like, Love, Haha...).","Logic Toggle:
+- Chưa react -> Tạo mới.
+- Đang Like -> Bấm Love -> Đổi thành Love.
+- Đang Like -> Bấm Like -> (FE nên gọi API DELETE).",Null,"{
+ ""target_type"": ""POST"", 
+ ""target_id"": 500,
+ ""reaction_type"": ""LOVE""
+}","Upsert:
+Check bảng REACTIONS (user_id, target_id, target_type):
+- Nếu chưa có: INSERT.
+- Nếu đã có: UPDATE reaction_type.",Null,"200 OK:
+{
+ ""action"": ""CREATED"",
+ ""reaction_type"": ""LOVE""
+}"
+,DELETE,/api/v1/reactions,Bỏ cảm xúc (Unlike).,Khi user bấm vào icon cảm xúc đang active để hủy.,Null,"{
+ ""target_type"": ""POST"",
+ ""target_id"": 500
+}","Action: DELETE FROM reactions WHERE ...
+Chỉ xóa được reaction của chính mình.",Null,"200 OK:
+{ ""action"": ""DELETED"" }"
+,GET,/api/v1/reactions,Xem danh sách người thả cảm xúc.,"Click vào số lượng like (VD: ""10 người khác"") để xem popup danh sách.",Null,"Query Params:
+target_type=POST
+target_id=500
+type=LOVE (Optional - để lọc)",Query: Select bảng REACTIONS join USERS.,Null,"200 OK:
+[
+ { ""user_id"": 10, ""name"": ""Nam"", ""avatar"": ""..."", ""type"": ""LOVE"" }
+]"
+,POST,/api/v1/posts/:id/share,Chia sẻ bài viết.,"(Reference Chunk 3)
+Đây là hành động tương tác, nhưng về mặt kỹ thuật là tạo Post mới.",Null,"{ ""text_content"": ""Caption mới"", ""privacy_setting"": ""FRIENDS"" }",Logic: (Xem lại logic Create Share Post ở Chunk 3).,Null,"201 Created:
+{ ""post_id"": ... }"
+,POST,/api/v1/interactions/seen,Đánh dấu đã xem (Tracking).,Dùng để lọc bài cũ trên Feed. Gọi ngầm (Background).,Null,"{ ""post_ids"": [500, 499] }",Action: INSERT IGNORE vào bảng USER_SEEN_POSTS.,Null,"200 OK:
+{ ""status"": ""synced"" }"
+,Group,,,,,,,,
+,POST,/api/v1/groups,Tạo nhóm mới.,"Form nhập tên, mô tả và chọn loại nhóm (Public/Private).",Null,"{
+ ""group_name"": ""Hội Yêu Mèo"",
+ ""description"": ""..."",
+ ""privacy_type"": ""PUBLIC"", 
+ ""cover_photo_url"": ""...""
+}","1. Insert Group: Tạo record trong GROUPS.
+
+2. Assign Admin: Insert người tạo vào GROUP_MEMBERSHIPS với role='ADMIN' và status='JOINED'.",Null,"201 Created:
+{ ""group_id"": 10, ""name"": ""..."" }"
+,GET,/api/v1/groups/:id,Xem thông tin chi tiết nhóm (Header).,"Logic UI:
+- Nếu chưa join: Hiện nút ""Join Group"".
+- Nếu là Admin: Hiện nút ""Settings"".",Null,(None),"1. Query: Lấy thông tin từ GROUPS.
+2. Context: Join bảng GROUP_MEMBERSHIPS để trả về my_role (MEMBER/ADMIN/NONE) và my_status (JOINED/PENDING).",Null,"200 OK:
+{
+ ""group_id"": 10,
+ ""name"": ""..."",
+ ""privacy"": ""PRIVATE"",
+ ""my_status"": ""PENDING""
+}"
+,GET,/api/v1/groups/:id/questions,Lấy câu hỏi kiểm duyệt (dành cho user chuẩn bị Join).,"Gọi API này khi user bấm nút ""Join"" ở nhóm Private để hiển thị Form trả lời.",Null,(None),Query: SELECT * FROM membership_questions WHERE group_id = :id.,Null,"200 OK:
+[
+ { ""question_id"": 1, ""text"": ""Why join?"" }
+]"
+,POST,/api/v1/groups/:id/join,Xin gia nhập nhóm.,"Nếu nhóm có câu hỏi, gửi kèm câu trả lời trong body.",Null,"{
+ ""answers"": [
+ { ""question_id"": 1, ""answer_text"": ""..."" }
+ ]
+}","1. Check Constraint 1.3.5.2: Nếu đã BANNED -> Lỗi 403.
+
+2. Logic Status:
+- Nếu privacy='PUBLIC' -> status='JOINED' (vào luôn).
+- Nếu privacy='PRIVATE' -> status='PENDING'.
+
+3. Save Answers: Nếu có answers, insert vào MEMBERSHIP_ANSWERS.",Null,"200 OK:
+{ ""status"": ""PENDING"", ""message"": ""Request sent"" }"
+,DELETE,/api/v1/groups/:id/leave,Rời nhóm / Hủy yêu cầu.,"Nút ""Leave Group"" hoặc ""Cancel Request"".",Null,(None),"Action: Xóa record trong GROUP_MEMBERSHIPS của user hiện tại (trừ khi là Admin duy nhất thì không cho rời, bắt chuyển quyền trước).",Null,"200 OK:
+{ ""status"": ""LEFT"" }"
+,GET,/api/v1/groups/:id/feed,Lấy bài đăng trong nhóm.,Scroll: ?limit=10&last_post_id=...,Null,(None),"Constraint 1.3.3.2:
+- Nếu Group là PRIVATE: User bắt buộc phải có status='JOINED' mới lấy được bài.
+- Nếu Group PUBLIC: Ai cũng xem được.
+
+Query: SELECT * FROM posts JOIN post_locations ... WHERE location_id=:group_id.",Null,"200 OK:
+[ { ""post_id"": ... } ]"
+,GET,/api/v1/groups/:id/members,Xem danh sách thành viên.,"Tab ""Members"".
+Admin dùng API này để xem cả list PENDING (chờ duyệt).",Null,Query: status=JOINED (mặc định) hoặc status=PENDING (cho Admin duyệt).,Query: SELECT * FROM group_memberships JOIN users ....,Null,"200 OK:
+[ { ""user_id"": 1, ""name"": ""..."", ""joined_at"": ""..."" } ]"
+,PUT,/api/v1/groups/:id/members/:userId,Duyệt / Từ chối / Ban thành viên.,Chỉ Admin/Mod mới gọi được.,Null,"{ ""status"": ""JOINED"" } 
+
+ (Hoặc BANNED)","1. Auth: Check user gọi API có phải Admin/Mod nhóm không.
+2. Action: Update status của userId mục tiêu.
+Constraint 1.3.5.4: Admin duyệt member.",Null,"200 OK:
+{ ""status"": ""JOINED"" }"
+,POST,/api/v1/groups/:id/questions,Tạo câu hỏi kiểm duyệt.,"Tab ""Settings"" của Admin.",Null,"{ ""question_text"": ""Bạn ở đâu?"" }",Auth: Chỉ Admin nhóm. Insert vào MEMBERSHIP_QUESTIONS.,Null,"201 Created:
+{ ""question_id"": 5 }"
+,POST,/api/v1/groups/:id/rules,Tạo nội quy nhóm.,"Tab ""Rules"" của Admin.",Null,"{ ""title"": ""No Spam"", ""details"": ""..."", ""display_order"": 1 }",Auth: Chỉ Admin nhóm. Insert vào GROUP_RULES.,Null,"201 Created:
+{ ""rule_id"": 99 }"
+,Page,,,,,,,,
+,POST,/api/v1/pages,Tạo trang mới.,"Form tạo trang: Tên, danh mục, mô tả.",Null,"{
+
+ ""page_name"": ""Tech Shop"",
+
+ ""category"": ""Technology"",
+
+ ""description"": ""...""
+
+}","1. Insert Page: Tạo record trong bảng PAGES.
+
+2. Assign Creator: Insert user hiện tại vào bảng PAGE_ROLES với role='ADMIN' (Người tạo auto là Admin cao nhất).",Null,"201 Created:
+{ ""page_id"": 99, ""name"": ""Tech Shop"" }"
+,GET,/api/v1/pages/:id,Xem thông tin chi tiết Page (Header).,"UI Logic:
+- Nếu my_role != NULL: Hiện nút ""Switch Profile"" hoặc ""Manage"".
+- Nếu is_followed = false: Hiện nút ""Follow"".",Null,(None),"1. Query Info: Lấy thông tin từ PAGES.
+2. Context Info (Quan trọng):
+- Check PAGE_ROLES -> Trả về my_role (ADMIN, EDITOR...).
+- Check PAGE_FOLLOWS -> Trả về is_followed (Boolean).",Null,"200 OK:
+{
+ ""page_id"": 99,
+ ""name"": ""..."",
+ ""avatar"": ""..."",
+ ""is_followed"": true,
+ ""my_role"": ""ADMIN""
+}"
+,PUT,/api/v1/pages/:id,Cập nhật thông tin Page.,Chỉ Admin mới thấy nút Edit Page.,Null,"{ ""description"": ""New desc"", ""contact_info"": ""..."" }","1. Auth: Check PAGE_ROLES. User phải là ADMIN (Editor thường không được sửa thông tin trang, chỉ đăng bài).
+
+2. Update: Bảng PAGES.",Null,"200 OK:
+{ ""message"": ""Updated"" }"
+,POST,/api/v1/pages/:id/follow,Theo dõi trang.,"Nút ""Follow"".",Null,(None),"Constraint 1.3.4.3: Cặp (user_id, page_id) phải duy nhất. Sử dụng INSERT IGNORE hoặc check tồn tại trước khi insert vào PAGE_FOLLOWS.",Null,"200 OK:
+{ ""status"": ""FOLLOWED"" }"
+,DELETE,/api/v1/pages/:id/follow,Bỏ theo dõi.,"Nút ""Unfollow"".",Null,(None),Action: DELETE khỏi bảng PAGE_FOLLOWS (Xóa cứng record theo Constraint 1.3.4.3).,Null,"200 OK:
+{ ""status"": ""UNFOLLOWED"" }"
+,GET,/api/v1/pages/:id/posts,Lấy bài đăng trên tường Page.,"Dùng chung UI List Post.
+
+Scroll: ?limit=10",Null,"Query Params: limit, last_post_id.","Logic Uniform (Đã chốt ở Chunk 3):
+
+SELECT * FROM posts p JOIN post_locations pl ...
+
+WHERE pl.location_type = 'PAGE_TIMELINE' AND pl.location_id = :page_id.
+
+(Lấy cả bài Page đăng và bài User khác đăng lên Page nếu có).",Null,"200 OK:
+[ { ""post_id"": 500, ""author_type"": ""PAGE"", ... } ]"
+,GET,/api/v1/pages/:id/roles,Xem danh sách quản trị viên.,"Tab ""Page Roles"" trong Settings (Chỉ Admin xem được).",Null,(None),"1. Auth: User gọi API phải là ADMIN của Page.
+
+2. Query: SELECT * FROM page_roles JOIN users ....",Null,"200 OK:
+[
+ { ""user_id"": 10, ""name"": ""Nam"", ""role"": ""EDITOR"" }
+]"
+,POST,/api/v1/pages/:id/roles,Thêm/Sửa quyền quản trị.,"Form ""Add Person"". Nhập email user để tìm, sau đó chọn role.",Null,"{
+
+ ""email"": ""user@test.com"",
+
+ ""role"": ""EDITOR"" 
+
+}","1. Auth: Chỉ ADMIN mới được quyền phân quyền.
+
+2. Validate User: Tìm user qua email.
+
+3. Constraint 1.3.4.2: Cặp (user_id, page_id) là duy nhất. Dùng ON DUPLICATE KEY UPDATE (nếu đã có quyền rồi thì sửa role, chưa có thì thêm mới).
+
+4. Enum Check: Role phải thuộc {'ADMIN', 'EDITOR', 'MODERATOR', 'ANALYST'}.",Null,"200 OK:
+{ ""message"": ""Role assigned"" }"
+,DELETE,/api/v1/pages/:id/roles/:userId,Xóa quyền quản trị.,"Nút ""Remove"" cạnh tên nhân viên.",Null,(None),"1. Auth: Chỉ ADMIN.
+
+2. Self-Check: Không cho phép tự xóa chính mình nếu là Admin duy nhất (để tránh Page mất chủ).
+
+3. Action: Delete record PAGE_ROLES.",Null,"200 OK:
+{ ""message"": ""Role removed"" }"
+,GET,/api/v1/me/pages,Lấy danh sách Page tôi quản lý.,"Dùng cho menu ""Switch Profile"" hoặc ""Your Pages"" bên sidebar trái.",Null,(None),"Query: SELECT * FROM page_roles pr JOIN pages p ... WHERE pr.user_id = :me.
+
+Trả về kèm role để FE biết user có quyền gì ở từng page.",Null,"200 OK:
+[
+ { ""page_id"": 99, ""name"": ""Shop"", ""role"": ""ADMIN"" }
+]"
+,Events,,,,,,,,
+,POST,/api/v1/events,Tạo sự kiện mới.,"UI Form:
+
+Chọn Host (Mình hoặc Page mình quản lý).
+
+Chọn Privacy (Public/Private/Friends).",Null,"{
+
+ ""event_name"": ""Tiệc Tất Niên"",
+
+ ""start_time"": ""2025-12-31T20:00:00"",
+
+ ""location_text"": ""Sân Mỹ Đình"",
+
+ ""privacy_setting"": ""PUBLIC"",
+
+ ""host_type"": ""USER"",
+
+ ""host_id"": 1
+
+}","1. Auth Host:
+
+- Nếu host_type='PAGE', check quyền Admin/Editor của user với host_id.
+
+- Nếu host_type='USER', host_id phải là me.
+
+2. Insert: Bảng EVENTS.
+
+3. Publish: Tự động tạo record trong EVENT_PUBLICATIONS (đăng lên tường host).",Null,"201 Created:
+
+{ ""event_id"": 500 }"
+,GET,/api/v1/events/:id,Xem chi tiết sự kiện.,Hiển thị nút RSVP (Going/Interested) dựa trên my_status.,Null,(None),"1. Privacy Check (Constraint 1.3.8.3): 2
+
+
+
+- Nếu PRIVATE: User phải là Host hoặc được mời/đã tham gia.
+
+2. Populate: Join USERS/PAGES để lấy thông tin Host.",Null,"200 OK:
+
+{
+
+ ""event_id"": 500,
+
+ ""name"": ""..."",
+
+ ""my_rsvp"": ""GOING""
+
+}"
+,PUT,/api/v1/events/:id,Cập nhật sự kiện.,Chỉ Host mới thấy nút Edit.,Null,"{ ""location_text"": ""Đổi địa điểm..."" }",Auth: Chỉ Host (hoặc Admin của Page host) mới được sửa.,Null,"200 OK:
+
+{ ""message"": ""Updated"" }"
+,POST,/api/v1/events/:id/rsvp,Phản hồi tham gia (RSVP).,"Các nút: ""Sẽ đi"", ""Quan tâm"", ""Không đi"".",Null,"{ ""status"": ""GOING"" }","Constraint 1.3.8.1 (Upsert): 3
+
+
+
+Một user chỉ có tối đa 1 record trong EVENT_PARTICIPANTS cho 1 event.
+
+- Nếu chưa có: INSERT.
+
+- Nếu có rồi: UPDATE rsvp_status.",Null,"200 OK:
+
+{ ""status"": ""GOING"" }"
+,GET,/api/v1/events/:id/participants,Xem danh sách người tham gia.,"Popup ""Ai sẽ đi?"".",Null,Query: status=GOING,Query: SELECT * FROM event_participants JOIN users ....,Null,"200 OK:
+
+[ { ""user_id"": 1, ""name"": ""..."" } ]"
+,GET,/api/v1/events,Lấy danh sách sự kiện của tôi.,"Tab ""My Events"". Bao gồm sự kiện tôi Host và tôi tham gia.",Null,Query: type=HOSTING hoặc type=GOING.,Query: Filter dựa trên bảng EVENTS (host) hoặc EVENT_PARTICIPANTS (user_id=me).,Null,"200 OK:
+
+[ { ""event_id"": 500, ""name"": ""..."" } ]"
+,Reports & Moderation,,,,,,,,
+,GET,/api/v1/reports/reasons,Lấy danh sách lý do báo cáo.,"Gọi API này khi user bấm nút ""Report"" để hiển thị Dropdown lý do (VD: Spam, Lừa đảo).",Null,(None),Query: Select toàn bộ bảng REPORT_REASONS (Metadata). 5,Null,"200 OK:
+
+[
+
+ { ""reason_id"": 1, ""title"": ""Spam"" },
+
+ { ""reason_id"": 2, ""title"": ""Hate Speech"" }
+
+]"
+,POST,/api/v1/reports,Gửi báo cáo vi phạm.,Form report.,Null,"{
+
+ ""target_type"": ""POST"",
+
+ ""target_id"": 100,
+
+ ""reason_id"": 1
+
+}","1. Constraint 1.3.9.1: 6
+
+
+
+Không cho phép user report chính bài viết/comment của mình.
+
+2. Constraint 1.3.9.2 (Anti-Spam): 7
+
+
+
+Check trong 24h qua, user này đã report target này với cùng reason chưa? Nếu rồi -> Bỏ qua hoặc Merge.
+
+3. Insert: REPORTS với status=PENDING.",Null,"201 Created:
+
+{ ""report_id"": 999, ""message"": ""Thanks for reporting"" }"
+,GET,/api/v1/admin/reports,(Admin Only) Xem danh sách báo cáo.,Dashboard quản trị (CMS).,Null,Query: status=PENDING,Auth: User phải có Role hệ thống là ADMIN hoặc MODERATOR (trong bảng USER_ROLES). 8,Null,"200 OK:
+
+[ { ""report_id"": 999, ""reason"": ""Spam"", ""target"": {...} } ]"
+,POST,/api/v1/admin/reports/:id/resolve,(Admin Only) Xử lý báo cáo.,"Admin quyết định: Xóa bài, Ban user, hoặc Bỏ qua.",Null,"{
+
+ ""action_taken"": ""DELETE_CONTENT"",
+
+ ""notes"": ""Vi phạm nặng""
+
+}","1. Constraint 1.3.9.3 (Cascade): 9
+
+
+
+Nếu action='DELETE_CONTENT': Backend phải Soft Delete bài viết/comment đó.
+
+2. Log: Insert vào REPORT_ACTIONS để lưu lịch sử xử lý.
+
+3. Update: Set REPORTS.status = 'ACTION_TAKEN'.",Null,"200 OK:
+
+{ ""status"": ""RESOLVED"" }"
