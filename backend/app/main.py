@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import models
 from .database import engine
 from .routes import router
+from .routers import admin
 
 # Ensure tables exist at startup
 models.Base.metadata.create_all(bind=engine)
@@ -20,6 +21,7 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api/v1")
+app.include_router(admin.router, prefix="/api/v1")
 
 
 @app.get("/", tags=["health"])

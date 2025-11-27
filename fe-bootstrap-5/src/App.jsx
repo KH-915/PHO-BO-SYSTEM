@@ -6,6 +6,9 @@ import Register from './pages/Register'
 import Feed from './pages/Feed'
 import FriendRequests from './pages/FriendRequests'
 import FriendList from './pages/FriendList'
+import AdminLayout from './pages/admin/AdminLayout'
+import UserManagement from './pages/admin/UserManagement'
+import Statistics from './pages/admin/Statistics'
 import { useAuth } from './contexts/AuthContext'
 
 export default function App(){
@@ -34,6 +37,13 @@ export default function App(){
           <Route path="/register" element={<Register />} />
           <Route path="/friends/requests" element={<FriendRequests />} />
           <Route path="/friends" element={<FriendList />} />
+          
+          {/* Admin Routes */}
+          <Route path="/admin" element={user ? <AdminLayout /> : <Navigate to="/login" replace />}>
+            <Route index element={<Navigate to="/admin/users" replace />} />
+            <Route path="users" element={<UserManagement />} />
+            <Route path="stats" element={<Statistics />} />
+          </Route>
         </Routes>
       </div>
     </>
