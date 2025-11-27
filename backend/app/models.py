@@ -44,6 +44,7 @@ class PostType(str, Enum):
 class LocationType(str, Enum):
     USER_TIMELINE = "USER_TIMELINE"
     GROUP = "GROUP"
+    PAGE_TIMELINE = "PAGE_TIMELINE"
 
 
 class CommentableType(str, Enum):
