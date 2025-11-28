@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -157,3 +157,57 @@ def get_statistics(year: int = 2025, min_posts: int = 0, db: Session = Depends(g
         db.rollback()
         error_msg = str(e.orig) if hasattr(e, 'orig') else str(e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error_msg)
+
+
+@router.get("/posts-sentiment")
+def list_posts_with_sentiment(
+    year: Optional[int] = Query(default=None),
+    min_score: Optional[int] = Query(default=None),
+    max_score: Optional[int] = Query(default=None),
+    q: Optional[str] = Query(default=None, description="keyword in text_content"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    """List posts with their sentiment score computed by func_calculate_post_sentiment.
+    Supports filtering by year, score range, and keyword.
+    """
+    try:
+        sql = text(
+            """
+            SELECT * FROM (
+                SELECT 
+                    p.post_id,
+                    p.author_id,
+                    p.text_content,
+                    p.created_at,
+                    func_calculate_post_sentiment(p.post_id) AS sentiment_score
+                FROM posts p
+                WHERE (:year IS NULL OR YEAR(p.created_at) = :year)
+                  AND (:q IS NULL OR p.text_content LIKE CONCAT('%', :q, '%'))
+            ) t
+            WHERE (:min_score IS NULL OR t.sentiment_score >= :min_score)
+              AND (:max_score IS NULL OR t.sentiment_score <= :max_score)
+            ORDER BY t.sentiment_score DESC, t.created_at DESC
+            LIMIT :limit
+            """
+        )
+        params = {
+            "year": year,
+            "q": q,
+            "min_score": min_score,
+            "max_score": max_score,
+            "limit": limit,
+        }
+        result = db.execute(sql, params)
+        rows = []
+        for row in result:
+            rows.append({
+                "post_id": row.post_id,
+                "author_id": row.author_id,
+                "text_content": row.text_content,
+                "created_at": str(row.created_at) if getattr(row, 'created_at', None) else None,
+                "sentiment_score": int(row.sentiment_score) if getattr(row, 'sentiment_score', None) is not None else None,
+            })
+        return rows
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

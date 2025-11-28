@@ -33,3 +33,14 @@ export const getStats = async (year, minPosts) => {
   const response = await api.get('/admin/stats', { params });
   return response.data;
 };
+
+export const getPostsSentiment = async ({ year, minScore, maxScore, q, limit } = {}) => {
+  const params = {};
+  if (year) params.year = year;
+  if (minScore !== undefined && minScore !== null) params.min_score = minScore;
+  if (maxScore !== undefined && maxScore !== null) params.max_score = maxScore;
+  if (q) params.q = q;
+  if (limit) params.limit = limit;
+  const response = await api.get('/admin/posts-sentiment', { params });
+  return response.data;
+};
