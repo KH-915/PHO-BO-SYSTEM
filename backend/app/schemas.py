@@ -196,7 +196,7 @@ class PostFile(PostFileBase):
 
 
 class CommentBase(BaseModel):
-    commenter_user_id: int
+    commenter_user_id: Optional[int] = None
     commentable_id: int
     commentable_type: models.CommentableType
     parent_comment_id: Optional[int] = None
@@ -220,7 +220,7 @@ class Comment(CommentBase):
 
 
 class ReactionBase(BaseModel):
-    reactor_user_id: int
+    reactor_user_id: Optional[int] = None
     reactable_id: int
     reactable_type: models.ReactionTargetType
     reaction_type: models.ReactionType
@@ -363,6 +363,7 @@ class GroupRule(GroupRuleBase):
 class MembershipQuestionBase(BaseModel):
     group_id: int
     question_text: str
+    is_required: Optional[bool] = False
 
 
 class MembershipQuestionCreate(MembershipQuestionBase):
@@ -371,6 +372,7 @@ class MembershipQuestionCreate(MembershipQuestionBase):
 
 class MembershipQuestionUpdate(BaseModel):
     question_text: Optional[str] = None
+    is_required: Optional[bool] = None
 
 
 class MembershipQuestion(MembershipQuestionBase):

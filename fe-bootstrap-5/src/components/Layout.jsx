@@ -33,13 +33,19 @@ export default function Layout() {
               <li className="nav-item">
                 <Link className="nav-link" to="/groups"><i className="bi bi-collection-fill"></i> Groups</Link>
               </li>
+              <li className="nav-item">
+                <Link className="nav-link" to="/pages"><i className="bi bi-flag-fill"></i> Pages</Link>
+              </li>
+              <li className="nav-item">
+                <Link className="nav-link" to="/events"><i className="bi bi-calendar-event-fill"></i> Events</Link>
+              </li>
             </ul>
 
             {/* Right: User Profile & Actions */}
             <div className="d-flex align-items-center gap-3">
               <Link to={`/profile/${user?.user_id}`} className="text-white text-decoration-none d-flex align-items-center gap-2">
                 <img 
-                  src={user?.profile_picture_url || 'https://via.placeholder.com/30'} 
+                  src={user?.profile_picture_url || '/default-ava.png'} 
                   className="rounded-circle border border-white" 
                   width="30" height="30" 
                   alt="me"

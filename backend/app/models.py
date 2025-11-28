@@ -55,6 +55,7 @@ class CommentableType(str, Enum):
 class ReactionTargetType(str, Enum):
     POST = "POST"
     COMMENT = "COMMENT"
+    FILE = "FILE"
 
 
 class ReactionType(str, Enum):
@@ -327,6 +328,7 @@ class MembershipQuestion(Base):
     question_id = Column(BigInteger, primary_key=True, autoincrement=True)
     group_id = Column(BigInteger, ForeignKey("groups.group_id"), nullable=False)
     question_text = Column(Text, nullable=False)
+    is_required = Column(Boolean, nullable=False, server_default="0")
 
 
 class MembershipAnswer(Base):

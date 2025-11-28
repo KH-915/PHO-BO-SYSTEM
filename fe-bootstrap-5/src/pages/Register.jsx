@@ -1,8 +1,10 @@
 import React, { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import Swal from 'sweetalert2'
 
 export default function Register() {
+  const navigate = useNavigate()
   // Initial state matches USERS + PROFILES table columns
   const [payload, setPayload] = useState({
     email: '',
@@ -26,8 +28,26 @@ export default function Register() {
     try {
       // Backend transaction: Insert USERS -> Get ID -> Insert PROFILES
       await register(payload)
+      
+      // Show success alert and redirect to login
+      await Swal.fire({
+        icon: 'success',
+        title: 'Registration Successful!',
+        text: 'Your account has been created. Please login to continue.',
+        confirmButtonText: 'Go to Login',
+        confirmButtonColor: '#0d6efd'
+      })
+      
+      navigate('/login')
     } catch (err) {
-      setError(err?.response?.data?.message || 'Register failed')
+      setError(err?.response?.data?.detail || err?.response?.data?.message || 'Register failed')
+      
+      Swal.fire({
+        icon: 'error',
+        title: 'Registration Failed',
+        text: err?.response?.data?.detail || 'Please try again',
+        confirmButtonColor: '#dc3545'
+      })
     }
   }
 

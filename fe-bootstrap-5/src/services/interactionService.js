@@ -1,15 +1,13 @@
 import api from './api'
 
-export async function toggleReaction(target_id, target_type, reaction_type = 'LIKE', reactor_user_id = null){
-  // POST /reactions with reaction payload. Backend expects reactor_user_id in this API.
+export async function toggleReaction(target_id, target_type, reaction_type = 'LIKE'){
+  // POST /reactions - backend gets user from cookie, but still needs the payload fields
   const payload = {
     reactable_id: target_id,
     reactable_type: target_type,
     reaction_type: reaction_type,
   }
-  if(reactor_user_id != null) payload.reactor_user_id = reactor_user_id
-  const res = await api.post('/reactions', payload)
-  return res.data
+  return api.post('/reactions', payload)
 }
 
 export async function removeReaction(target_id, target_type, reactor_user_id){
@@ -20,19 +18,19 @@ export async function removeReaction(target_id, target_type, reactor_user_id){
 }
 
 export async function getComments(target_id, target_type){
-  const res = await api.get('/comments', { params: { commentable_id: target_id, commentable_type: target_type } })
-  return res.data
+  return api.get('/comments', { params: { commentable_id: target_id, commentable_type: target_type } })
 }
 
-export async function createComment(target_id, target_type, text, commenter_user_id = null){
+export async function createComment(target_id, target_type, text, parent_comment_id = null){
   const payload = {
     commentable_id: target_id,
     commentable_type: target_type,
     text_content: text,
   }
-  if(commenter_user_id != null) payload.commenter_user_id = commenter_user_id
-  const res = await api.post('/comments', payload)
-  return res.data
+  if (parent_comment_id) {
+    payload.parent_comment_id = parent_comment_id
+  }
+  return api.post('/comments', payload)
 }
 
 export default {

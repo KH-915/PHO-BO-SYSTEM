@@ -105,6 +105,10 @@ def auth_register(payload: dict, response: Response, db: Session = Depends(get_d
         date_of_birth = payload.get('date_of_birth')
         gender = payload.get('gender')
 
+        # Convert empty string to None for phone_number
+        if phone == '':
+            phone = None
+
         if not email or not password:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -164,8 +168,10 @@ def auth_register(payload: dict, response: Response, db: Session = Depends(get_d
         return {
             "message": "Đăng ký thành công",
             "user": {
-                "id": user.user_id,
-                "email": user.email
+                "user_id": user.user_id,
+                "email": user.email,
+                "first_name": first_name,
+                "last_name": last_name
             }
         }
 
@@ -187,7 +193,7 @@ def auth_login(payload: dict, response: Response, db: Session = Depends(get_db))
 
     # return user info
     profile = db.query(models.Profile).filter(models.Profile.user_id == user.user_id).first()
-    user_info = {"id": user.user_id, "email": user.email}
+    user_info = {"user_id": user.user_id, "email": user.email}
     if profile:
         user_info.update({"first_name": profile.first_name, "last_name": profile.last_name})
     return {"access_token": token, "token_type": "Bearer", "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES*60, "user": user_info}
@@ -227,7 +233,7 @@ def users_me(request: Request, db: Session = Depends(get_db)):
 
 @router.get('/users/suggestions')
 def users_suggestions(request: Request, db: Session = Depends(get_db)):
-    """Return a small list of user suggestions (exclude current user and existing friendships/pending)."""
+    """Return a list of user suggestions (exclude current user and existing friendships/pending)."""
     current = get_current_user_from_cookie(request, db)
     current_id = current.user_id
 
@@ -250,13 +256,14 @@ def users_suggestions(request: Request, db: Session = Depends(get_db)):
         db.query(models.User, models.Profile)
         .outerjoin(models.Profile, models.Profile.user_id == models.User.user_id)
         .filter(~models.User.user_id.in_(list(exclude_ids)))
-        .limit(10)
+        .limit(100)  # Increased limit to show more users
     )
     results = []
     for user, profile in q.all():
         results.append(
             {
                 "user_id": user.user_id,
+                "email": user.email,
                 "first_name": getattr(profile, "first_name", "") if profile else "",
                 "last_name": getattr(profile, "last_name", "") if profile else "",
                 "avatar_url": getattr(profile, "profile_picture_url", None) if profile else None,
@@ -291,12 +298,47 @@ def get_feed(request: Request, db: Session = Depends(get_db), limit: int = 20):
             other = f.user_two_id if f.user_one_id == current_id else f.user_one_id
             friend_ids.add(other)
 
-    # build query
+    # build query - include public posts, user's own posts, friends' posts, group posts, and followed page posts
     conds = [models.Post.privacy_setting == models.PrivacySetting.PUBLIC]
     if current_id:
         conds.append(models.Post.author_id == current_id)
         if friend_ids:
             conds.append(and_(models.Post.privacy_setting == models.PrivacySetting.FRIENDS, models.Post.author_id.in_(list(friend_ids))))
+        
+        # Add posts from groups the user has joined
+        joined_groups = db.query(models.GroupMembership.group_id).filter(
+            models.GroupMembership.user_id == current_id,
+            models.GroupMembership.status == models.GroupMemberStatus.JOINED
+        ).all()
+        joined_group_ids = [g[0] for g in joined_groups]
+        
+        if joined_group_ids:
+            # Get post IDs from these groups
+            group_post_ids = db.query(models.PostLocation.post_id).filter(
+                models.PostLocation.location_type == models.LocationType.GROUP,
+                models.PostLocation.location_id.in_(joined_group_ids)
+            ).all()
+            group_post_ids = [p[0] for p in group_post_ids]
+            
+            if group_post_ids:
+                conds.append(models.Post.post_id.in_(group_post_ids))
+        
+        # Add posts from pages the user follows
+        followed_pages = db.query(models.PageFollow.page_id).filter(
+            models.PageFollow.user_id == current_id
+        ).all()
+        followed_page_ids = [p[0] for p in followed_pages]
+        
+        if followed_page_ids:
+            # Get post IDs from these pages
+            page_post_ids = db.query(models.PostLocation.post_id).filter(
+                models.PostLocation.location_type == models.LocationType.PAGE_TIMELINE,
+                models.PostLocation.location_id.in_(followed_page_ids)
+            ).all()
+            page_post_ids = [p[0] for p in page_post_ids]
+            
+            if page_post_ids:
+                conds.append(models.Post.post_id.in_(page_post_ids))
 
     query = db.query(models.Post).filter(or_(*conds)).order_by(desc(models.Post.created_at)).limit(limit)
     posts = []
@@ -324,7 +366,7 @@ def get_feed(request: Request, db: Session = Depends(get_db), limit: int = 20):
             )
             is_liked = True if exists else False
 
-        posts.append({
+        post_data = {
             "post_id": p.post_id,
             "author_id": p.author_id,
             "author_name": (profile.first_name + ' ' + profile.last_name) if profile else None,
@@ -332,9 +374,139 @@ def get_feed(request: Request, db: Session = Depends(get_db), limit: int = 20):
             "text_content": p.text_content,
             "privacy_setting": p.privacy_setting,
             "created_at": p.created_at,
+            "post_type": p.post_type,
             "stats": {"likes": int(likes or 0), "comments": int(comments or 0)},
             "is_liked_by_me": bool(is_liked),
-        })
+            "files": [],
+            "location": None
+        }
+        
+        # Get post location (if posted in group or page)
+        post_location = db.query(models.PostLocation).filter(models.PostLocation.post_id == p.post_id).first()
+        if post_location:
+            if post_location.location_type == models.LocationType.GROUP:
+                group = db.query(models.Group).filter(models.Group.group_id == post_location.location_id).first()
+                if group:
+                    post_data["location"] = {
+                        "type": "GROUP",
+                        "group_id": group.group_id,
+                        "group_name": group.group_name
+                    }
+            elif post_location.location_type == models.LocationType.PAGE_TIMELINE:
+                page = db.query(models.Page).filter(models.Page.page_id == post_location.location_id).first()
+                if page:
+                    post_data["location"] = {
+                        "type": "PAGE",
+                        "page_id": page.page_id,
+                        "page_name": page.page_name
+                    }
+                    # Override author info to show page name
+                    post_data["author_name"] = page.page_name
+                    post_data["author_avatar"] = None
+
+        # Get attached files
+        post_files = (
+            db.query(models.PostFile)
+            .filter(models.PostFile.post_id == p.post_id)
+            .order_by(models.PostFile.display_order)
+            .all()
+        )
+        for pf in post_files:
+            file_obj = db.query(models.File).filter(models.File.file_id == pf.file_id).first()
+            if file_obj:
+                # Determine file kind
+                kind = "FILE"
+                if file_obj.file_type.startswith("image/"):
+                    kind = "IMAGE"
+                elif file_obj.file_type.startswith("video/"):
+                    kind = "VIDEO"
+                
+                # Get file stats (reactions and comments)
+                file_likes = (
+                    db.query(func.count(models.Reaction.reactable_id))
+                    .filter(models.Reaction.reactable_type == models.ReactionTargetType.FILE, 
+                           models.Reaction.reactable_id == file_obj.file_id)
+                    .scalar()
+                )
+                file_comments = (
+                    db.query(func.count(models.Comment.comment_id))
+                    .filter(models.Comment.commentable_type == models.CommentableType.FILE,
+                           models.Comment.commentable_id == file_obj.file_id)
+                    .scalar()
+                )
+                file_is_liked = False
+                if current_id:
+                    file_reaction = (
+                        db.query(models.Reaction)
+                        .filter(models.Reaction.reactable_type == models.ReactionTargetType.FILE,
+                               models.Reaction.reactable_id == file_obj.file_id,
+                               models.Reaction.reactor_user_id == current_id)
+                        .first()
+                    )
+                    file_is_liked = True if file_reaction else False
+
+                post_data["files"].append({
+                    "file_id": file_obj.file_id,
+                    "file_name": file_obj.file_name,
+                    "file_type": file_obj.file_type,
+                    "file_url": file_obj.file_url,
+                    "thumbnail_url": file_obj.thumbnail_url,
+                    "kind": kind,
+                    "stats": {"likes": int(file_likes or 0), "comments": int(file_comments or 0)},
+                    "is_liked_by_me": bool(file_is_liked)
+                })
+
+        # If this is a shared post, include the original post data recursively
+        if p.post_type == models.PostType.SHARE and p.parent_post_id:
+            def get_shared_post_data(post_id):
+                shared = db.query(models.Post).filter(models.Post.post_id == post_id).first()
+                if not shared:
+                    return None
+                shared_profile = db.query(models.Profile).filter(models.Profile.user_id == shared.author_id).first()
+                shared_data = {
+                    "post_id": shared.post_id,
+                    "author_id": shared.author_id,
+                    "author_name": (shared_profile.first_name + ' ' + shared_profile.last_name) if shared_profile else None,
+                    "author_avatar": getattr(shared_profile, 'profile_picture_url', None) if shared_profile else None,
+                    "text_content": shared.text_content,
+                    "privacy_setting": shared.privacy_setting,
+                    "created_at": shared.created_at,
+                    "post_type": shared.post_type,
+                    "files": []
+                }
+                
+                # Get files for shared post
+                shared_post_files = (
+                    db.query(models.PostFile)
+                    .filter(models.PostFile.post_id == shared.post_id)
+                    .order_by(models.PostFile.display_order)
+                    .all()
+                )
+                for spf in shared_post_files:
+                    sfile_obj = db.query(models.File).filter(models.File.file_id == spf.file_id).first()
+                    if sfile_obj:
+                        kind = "FILE"
+                        if sfile_obj.file_type.startswith("image/"):
+                            kind = "IMAGE"
+                        elif sfile_obj.file_type.startswith("video/"):
+                            kind = "VIDEO"
+                        shared_data["files"].append({
+                            "file_id": sfile_obj.file_id,
+                            "file_name": sfile_obj.file_name,
+                            "file_type": sfile_obj.file_type,
+                            "file_url": sfile_obj.file_url,
+                            "thumbnail_url": sfile_obj.thumbnail_url,
+                            "kind": kind
+                        })
+                
+                # Recursively get parent if this is also a share
+                if shared.post_type == models.PostType.SHARE and shared.parent_post_id:
+                    shared_data["shared_post"] = get_shared_post_data(shared.parent_post_id)
+                return shared_data
+            
+            post_data["shared_post"] = get_shared_post_data(p.parent_post_id)
+
+        posts.append(post_data)
     return posts
 
 
@@ -524,14 +696,15 @@ def register_simple_crud(prefix: str, model_cls, create_schema, update_schema, r
 
 
 # Register CRUD routes for single primary-key tables
-register_simple_crud(
-    prefix="users",
-    model_cls=models.User,
-    create_schema=schemas.UserCreate,
-    update_schema=schemas.UserUpdate,
-    response_schema=schemas.User,
-    pk_field="user_id",
-)
+# Comment out users simple CRUD - we have custom endpoints for user profile
+# register_simple_crud(
+#     prefix="users",
+#     model_cls=models.User,
+#     create_schema=schemas.UserCreate,
+#     update_schema=schemas.UserUpdate,
+#     response_schema=schemas.User,
+#     pk_field="user_id",
+# )
 register_simple_crud(
     prefix="profiles",
     model_cls=models.Profile,
@@ -566,9 +739,70 @@ register_simple_crud(
     response_schema=schemas.File,
     pk_field="file_id",
 )
+
+# Groups CRUD - Using custom endpoints instead of register_simple_crud
+# register_simple_crud(
+#     prefix="groups",
+#     model_cls=models.Group,
+#     create_schema=schemas.GroupCreate,
+#     update_schema=schemas.GroupUpdate,
+#     response_schema=schemas.Group,
+#     pk_field="group_id",
+# )
+
+# Group Rules CRUD
+register_simple_crud(
+    prefix="group-rules",
+    model_cls=models.GroupRule,
+    create_schema=schemas.GroupRuleCreate,
+    update_schema=schemas.GroupRuleUpdate,
+    response_schema=schemas.GroupRule,
+    pk_field="rule_id",
+)
+
+# Membership Questions CRUD - Using custom endpoint with group_id filter
+# register_simple_crud(
+#     prefix="membership-questions",
+#     model_cls=models.MembershipQuestion,
+#     create_schema=schemas.MembershipQuestionCreate,
+#     update_schema=schemas.MembershipQuestionUpdate,
+#     response_schema=schemas.MembershipQuestion,
+#     pk_field="question_id",
+# )
+
+@router.get("/membership-questions")
+def get_membership_questions(group_id: int, db: Session = Depends(get_db)):
+    """Get membership questions for a specific group"""
+    return db.query(models.MembershipQuestion).filter(
+        models.MembershipQuestion.group_id == group_id
+    ).all()
+
+@router.post("/membership-questions", status_code=status.HTTP_201_CREATED)
+def create_membership_question(payload: schemas.MembershipQuestionCreate, db: Session = Depends(get_db)):
+    """Create a new membership question"""
+    obj = models.MembershipQuestion(**payload.model_dump(exclude_unset=True))
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+@router.delete("/membership-questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_membership_question(question_id: int, db: Session = Depends(get_db)):
+    """Delete a membership question"""
+    question = db.query(models.MembershipQuestion).filter(
+        models.MembershipQuestion.question_id == question_id
+    ).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    db.delete(question)
+    db.commit()
+
 @router.post("/comments", status_code=status.HTTP_201_CREATED)
-def create_comment(payload: schemas.CommentCreate, db: Session = Depends(get_db)):
-    obj = models.Comment(**payload.model_dump())
+def create_comment(payload: schemas.CommentCreate, request: Request, db: Session = Depends(get_db)):
+    current = get_current_user_from_cookie(request, db)
+    data = payload.model_dump()
+    data['commenter_user_id'] = current.user_id
+    obj = models.Comment(**data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -651,22 +885,57 @@ def delete_comment(comment_id: int, db: Session = Depends(get_db)):
     obj = _get_simple_object(db, models.Comment, "comment_id", comment_id)
     db.delete(obj)
     db.commit()
-register_simple_crud(
-    prefix="pages",
-    model_cls=models.Page,
-    create_schema=schemas.PageCreate,
-    update_schema=schemas.PageUpdate,
-    response_schema=schemas.Page,
-    pk_field="page_id",
-)
-register_simple_crud(
-    prefix="groups",
-    model_cls=models.Group,
-    create_schema=schemas.GroupCreate,
-    update_schema=schemas.GroupUpdate,
-    response_schema=schemas.Group,
-    pk_field="group_id",
-)
+
+# Pages CRUD - Using custom create endpoint to auto-assign ADMIN role
+@router.post("/pages", response_model=schemas.Page, status_code=status.HTTP_201_CREATED)
+def create_page(payload: schemas.PageCreate, request: Request, db: Session = Depends(get_db)):
+    """Create a page and automatically assign creator as ADMIN"""
+    current = get_current_user_from_cookie(request, db)
+    
+    obj = models.Page(**payload.model_dump(exclude_unset=True))
+    db.add(obj)
+    db.flush()  # Get the page_id without committing
+    
+    # Automatically assign creator as ADMIN
+    page_role = models.PageRole(
+        user_id=current.user_id,
+        page_id=obj.page_id,
+        role=models.PageRoleEnum.ADMIN
+    )
+    db.add(page_role)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+@router.get("/pages", response_model=list[schemas.Page])
+def list_pages(db: Session = Depends(get_db)):
+    return db.query(models.Page).all()
+
+@router.put("/pages/{item_id}", response_model=schemas.Page)
+def update_page(item_id: int, payload: schemas.PageUpdate, db: Session = Depends(get_db)):
+    obj = _get_simple_object(db, models.Page, "page_id", item_id)
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(obj, key, value)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+@router.delete("/pages/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_page(item_id: int, db: Session = Depends(get_db)):
+    obj = _get_simple_object(db, models.Page, "page_id", item_id)
+    db.delete(obj)
+    db.commit()
+
+# Groups CRUD - Using custom endpoints (duplicate removed)
+# register_simple_crud(
+#     prefix="groups",
+#     model_cls=models.Group,
+#     create_schema=schemas.GroupCreate,
+#     update_schema=schemas.GroupUpdate,
+#     response_schema=schemas.Group,
+#     pk_field="group_id",
+# )
 register_simple_crud(
     prefix="group-rules",
     model_cls=models.GroupRule,
@@ -830,14 +1099,6 @@ def create_post(
     if not text_content and not file_ids:
         raise HTTPException(status_code=400, detail="EMPTY_POST")
 
-    # --- privacy ---
-    privacy = payload.get("privacy_setting") or models.PrivacySetting.PUBLIC
-    if isinstance(privacy, str):
-        try:
-            privacy = models.PrivacySetting[privacy]
-        except KeyError:
-            raise HTTPException(status_code=400, detail="INVALID_PRIVACY")
-
     # --- location ---
     location_type = payload.get("location_type") or models.LocationType.USER_TIMELINE
     if isinstance(location_type, str):
@@ -854,8 +1115,16 @@ def create_post(
             location_id = current.user_id
         if location_id != current.user_id:
             raise HTTPException(status_code=403, detail="CANNOT_POST_TO_OTHER_TIMELINE")
+        
+        # Privacy setting chỉ áp dụng cho USER_TIMELINE
+        privacy = payload.get("privacy_setting") or models.PrivacySetting.PUBLIC
+        if isinstance(privacy, str):
+            try:
+                privacy = models.PrivacySetting[privacy]
+            except KeyError:
+                raise HTTPException(status_code=400, detail="INVALID_PRIVACY")
 
-    # GROUP: phải là member JOINED
+    # GROUP: phải là member JOINED, privacy luôn là PUBLIC (visibility phụ thuộc vào group)
     elif location_type == models.LocationType.GROUP:
         if not location_id:
             raise HTTPException(status_code=400, detail="MISSING_LOCATION_ID")
@@ -866,6 +1135,9 @@ def create_post(
         ).first()
         if not gm:
             raise HTTPException(status_code=403, detail="GROUP_NOT_JOINED")
+        
+        # Bài đăng trong group luôn là PUBLIC, visibility do group privacy quyết định
+        privacy = models.PrivacySetting.PUBLIC
 
     # PAGE_TIMELINE: phải có PageRole bất kỳ
     elif location_type == models.LocationType.PAGE_TIMELINE:
@@ -877,18 +1149,30 @@ def create_post(
         ).first()
         if not role:
             raise HTTPException(status_code=403, detail="PAGE_ACCESS_DENIED")
+        
+        # Bài đăng trên page cũng mặc định là PUBLIC
+        privacy = models.PrivacySetting.PUBLIC
 
     else:
         # nếu spec có thêm các loại khác, sau này bổ sung tiếp
         raise HTTPException(status_code=400, detail="UNSUPPORTED_LOCATION_TYPE")
 
+    # --- Determine author based on location type ---
+    # When posting to a PAGE, the author should be the page, not the user
+    if location_type == models.LocationType.PAGE_TIMELINE:
+        author_id = location_id
+        author_type = models.PostAuthorType.PAGE
+    else:
+        author_id = current.user_id
+        author_type = models.PostAuthorType.USER
+
     # --- tạo Post ---
     post = models.Post(
-        author_id=current.user_id,
-        author_type=models.PostAuthorType.USER,
+        author_id=author_id,
+        author_type=author_type,
         text_content=text_content,
         privacy_setting=privacy,
-        post_type=models.PostType.REGULAR,  # enum REGULAR/SHARE/...; dùng giá trị text tuỳ bạn khai báo
+        post_type=models.PostType.ORIGINAL,  # enum REGULAR/SHARE/...; dùng giá trị text tuỳ bạn khai báo
     )
     db.add(post)
     db.commit()
@@ -1258,18 +1542,33 @@ def get_user_profile(user_id: int, request: Request, db: Session = Depends(get_d
         viewer = get_current_user_from_cookie(request, db)
     except HTTPException:
         pass
+    viewer_id = getattr(viewer, "user_id", None)
+    
     user = db.query(models.User).filter(models.User.user_id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     profile = db.query(models.Profile).filter(models.Profile.user_id == user_id).first()
-    return {
+    
+    # Chỉ hiện email và date_of_birth nếu xem profile chính mình
+    show_private = (viewer_id == user_id)
+    
+    result = {
         "user_id": user.user_id,
         "first_name": getattr(profile, "first_name", ""),
         "last_name": getattr(profile, "last_name", ""),
         "avatar_url": getattr(profile, "profile_picture_url", None),
+        "cover_photo_url": getattr(profile, "cover_photo_url", None),
         "bio": getattr(profile, "bio", None),
-        "friendship_status": _friendship_status(db, getattr(viewer, "user_id", None), user_id),
+        "gender": getattr(profile, "gender", None),
+        "friendship_status": _friendship_status(db, viewer_id, user_id),
     }
+    
+    if show_private:
+        result["email"] = user.email
+        result["phone_number"] = user.phone_number
+        result["date_of_birth"] = getattr(profile, "date_of_birth", None)
+    
+    return result
 
 @router.put("/users/me")
 def update_me(payload: dict, request: Request, db: Session = Depends(get_db)):
@@ -1311,7 +1610,57 @@ def user_posts(user_id: int, request: Request, db: Session = Depends(get_db), li
         .limit(limit)
         .all()
     )
-    return posts
+    
+    # Format posts with full info like feed
+    result = []
+    for post in posts:
+        # Get author info
+        author_profile = db.query(models.Profile).filter(models.Profile.user_id == post.author_id).first()
+        author_name = "Unknown"
+        author_avatar = None
+        if author_profile:
+            author_name = f"{author_profile.first_name} {author_profile.last_name}".strip()
+            author_avatar = author_profile.profile_picture_url
+        
+        # Get location info
+        location_info = None
+        post_location = db.query(models.PostLocation).filter(models.PostLocation.post_id == post.post_id).first()
+        if post_location:
+            if post_location.location_type == models.LocationType.GROUP:
+                group = db.query(models.Group).filter(models.Group.group_id == post_location.location_id).first()
+                if group:
+                    location_info = {"type": "GROUP", "id": group.group_id, "name": group.group_name}
+            elif post_location.location_type == models.LocationType.PAGE_TIMELINE:
+                page = db.query(models.Page).filter(models.Page.page_id == post_location.location_id).first()
+                if page:
+                    location_info = {"type": "PAGE", "id": page.page_id, "name": page.page_name}
+        
+        # Get files
+        post_files_links = db.query(models.PostFile).filter(models.PostFile.post_id == post.post_id).all()
+        files = []
+        for pf in post_files_links:
+            file = db.query(models.File).filter(models.File.file_id == pf.file_id).first()
+            if file:
+                files.append({
+                    "file_id": file.file_id,
+                    "file_url": file.file_url,
+                    "file_type": file.file_type,
+                    "thumbnail_url": file.thumbnail_url
+                })
+        
+        result.append({
+            "post_id": post.post_id,
+            "author_id": post.author_id,
+            "author_name": author_name,
+            "author_avatar": author_avatar,
+            "text_content": post.text_content,
+            "privacy_setting": post.privacy_setting,
+            "created_at": post.created_at,
+            "location": location_info,
+            "files": files
+        })
+    
+    return result
 
 # --- Friends extras: cancel, block, list with pagination ---
 @router.delete("/friends/{target_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
@@ -1391,6 +1740,17 @@ def upload_media(
     unique_name = f"user_{user.user_id}_{uuid4().hex}"
     try:
         result = upload_to_cloudinary(content, unique_name)
+    except ValueError as e:
+        # Cloudinary not configured
+        raise HTTPException(
+            status_code=503, 
+            detail=f"File upload service unavailable: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"File upload failed: {str(e)}"
+        )
     finally:
         file.file.close()
 
@@ -1442,7 +1802,7 @@ def share_post(post_id: int, payload: dict, request: Request, db: Session = Depe
         text_content=text_content,
         privacy_setting=privacy,
         post_type=models.PostType.SHARE,
-        parent_post_id=original.parent_post_id or original.post_id,
+        parent_post_id=original.post_id,  # Store immediate parent, not original
     )
     db.add(share)
     db.commit()
@@ -1467,22 +1827,257 @@ def mark_seen(payload: dict, request: Request, db: Session = Depends(get_db)):
     return {"status": "synced"}
 
 # --- Groups ---
+@router.get("/groups/my-groups")
+async def get_my_groups(request: Request, db: Session = Depends(get_db)):
+    """Get all groups user is a member of"""
+    current = get_current_user_from_cookie(request, db)
+    
+    memberships = db.query(models.GroupMembership).filter(
+        models.GroupMembership.user_id == current.user_id,
+        models.GroupMembership.status.in_([models.GroupMemberStatus.JOINED, models.GroupMemberStatus.PENDING])
+    ).all()
+    
+    result = []
+    for m in memberships:
+        group = db.query(models.Group).filter(models.Group.group_id == m.group_id).first()
+        if group:
+            member_count = db.query(models.GroupMembership).filter(
+                models.GroupMembership.group_id == group.group_id,
+                models.GroupMembership.status == models.GroupMemberStatus.JOINED
+            ).count()
+            
+            result.append({
+                "group_id": group.group_id,
+                "group_name": group.group_name,
+                "description": group.description,
+                "cover_photo_url": group.cover_photo_url,
+                "privacy_type": group.privacy_type,
+                "member_count": member_count,
+                "my_role": m.role,
+                "my_status": m.status,
+            })
+    
+    return result
+
 @router.get("/groups/{group_id}")
 def get_group(group_id: int, request: Request, db: Session = Depends(get_db)):
-    current = get_current_user_from_cookie(request, db)
+    try:
+        current = get_current_user_from_cookie(request, db)
+        current_id = current.user_id
+    except:
+        current_id = None
+    
     group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    membership = db.query(models.GroupMembership).filter(
-        models.GroupMembership.user_id == current.user_id,
+    
+    # Check if user is banned
+    if current_id:
+        membership = db.query(models.GroupMembership).filter(
+            models.GroupMembership.user_id == current_id,
+            models.GroupMembership.group_id == group_id,
+        ).first()
+        
+        if membership and membership.status == models.GroupMemberStatus.BANNED:
+            raise HTTPException(status_code=403, detail="You are banned from this group")
+        
+        my_status = getattr(membership, "status", None)
+        my_role = getattr(membership, "role", None)
+    else:
+        my_status = None
+        my_role = None
+    
+    # Get creator profile
+    creator_profile = db.query(models.Profile).filter(models.Profile.user_id == group.creator_user_id).first()
+    creator_name = None
+    if creator_profile:
+        creator_name = f"{creator_profile.first_name} {creator_profile.last_name}".strip()
+    
+    # Get member count
+    member_count = db.query(models.GroupMembership).filter(
         models.GroupMembership.group_id == group_id,
-    ).first()
+        models.GroupMembership.status == models.GroupMemberStatus.JOINED
+    ).count()
+    
     return {
         "group_id": group.group_id,
-        "name": group.group_name,
-        "privacy": group.privacy_type,
-        "my_status": getattr(membership, "status", None),
-        "my_role": getattr(membership, "role", None),
+        "group_name": group.group_name,
+        "description": group.description,
+        "cover_photo_url": group.cover_photo_url,
+        "privacy_type": group.privacy_type,
+        "is_visible": group.is_visible,
+        "creator_user_id": group.creator_user_id,
+        "creator_name": creator_name,
+        "created_at": group.created_at,
+        "member_count": member_count,
+        "my_status": my_status,
+        "my_role": my_role,
+    }
+
+@router.get("/groups/{group_id}/posts")
+def get_group_posts(group_id: int, request: Request, db: Session = Depends(get_db)):
+    """Get all posts in a group"""
+    try:
+        current = get_current_user_from_cookie(request, db)
+        current_id = current.user_id
+    except:
+        current_id = None
+    
+    group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # For PRIVATE groups, only members can see posts
+    if group.privacy_type == models.GroupPrivacy.PRIVATE:
+        if not current_id:
+            raise HTTPException(status_code=401, detail="Login required")
+        
+        membership = db.query(models.GroupMembership).filter(
+            models.GroupMembership.user_id == current_id,
+            models.GroupMembership.group_id == group_id,
+            models.GroupMembership.status == models.GroupMemberStatus.JOINED
+        ).first()
+        
+        if not membership:
+            raise HTTPException(status_code=403, detail="Only members can view posts in private groups")
+    
+    # Get post locations for this group
+    post_locations = db.query(models.PostLocation).filter(
+        models.PostLocation.location_type == models.LocationType.GROUP,
+        models.PostLocation.location_id == group_id
+    ).all()
+    
+    post_ids = [pl.post_id for pl in post_locations]
+    if not post_ids:
+        return []
+    
+    # Get posts
+    posts = db.query(models.Post).filter(models.Post.post_id.in_(post_ids)).order_by(models.Post.created_at.desc()).all()
+    
+    result = []
+    for post in posts:
+        # Get author info
+        author_profile = db.query(models.Profile).filter(models.Profile.user_id == post.author_id).first()
+        author_name = "Unknown"
+        author_avatar = None
+        if author_profile:
+            author_name = f"{author_profile.first_name} {author_profile.last_name}".strip()
+            author_avatar = author_profile.profile_picture_url
+        
+        # Get files
+        post_files_links = db.query(models.PostFile).filter(models.PostFile.post_id == post.post_id).all()
+        files = []
+        for pf in post_files_links:
+            file = db.query(models.File).filter(models.File.file_id == pf.file_id).first()
+            if file:
+                files.append({
+                    "file_id": file.file_id,
+                    "file_url": file.file_url,
+                    "file_type": file.file_type,
+                    "thumbnail_url": file.thumbnail_url
+                })
+        
+        result.append({
+            "post_id": post.post_id,
+            "author_id": post.author_id,
+            "author_name": author_name,
+            "author_avatar": author_avatar,
+            "text_content": post.text_content,
+            "privacy_setting": post.privacy_setting,
+            "created_at": post.created_at,
+            "files": files
+        })
+    
+    return result
+
+@router.get("/groups")
+def get_all_groups(db: Session = Depends(get_db)):
+    """Get all visible groups with member counts"""
+    groups = db.query(models.Group).filter(
+        models.Group.is_visible == True
+    ).all()
+    
+    result = []
+    for group in groups:
+        member_count = db.query(models.GroupMembership).filter(
+            models.GroupMembership.group_id == group.group_id,
+            models.GroupMembership.status == models.GroupMemberStatus.JOINED
+        ).count()
+        
+        creator = db.query(models.User).filter(models.User.user_id == group.creator_user_id).first()
+        creator_profile = db.query(models.Profile).filter(models.Profile.user_id == group.creator_user_id).first() if creator else None
+        creator_name = None
+        if creator_profile:
+            creator_name = ((creator_profile.first_name or '') + ' ' + (creator_profile.last_name or '')).strip() or None
+        
+        result.append({
+            "group_id": group.group_id,
+            "group_name": group.group_name,
+            "description": group.description,
+            "cover_photo_url": group.cover_photo_url,
+            "privacy_type": group.privacy_type,
+            "member_count": member_count,
+            "creator_name": creator_name,
+            "created_at": group.created_at.isoformat() if group.created_at else None
+        })
+    
+    return result
+
+@router.post("/groups", status_code=status.HTTP_201_CREATED)
+def create_group_with_setup(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Create group with rules and questions in one request"""
+    current = get_current_user_from_cookie(request, db)
+    
+    # Create group
+    group = models.Group(
+        creator_user_id=current.user_id,
+        group_name=payload["group_name"],
+        description=payload.get("description"),
+        cover_photo_url=payload.get("cover_photo_url"),
+        privacy_type=payload.get("privacy_type", "PUBLIC"),
+        is_visible=payload.get("is_visible", True),
+    )
+    db.add(group)
+    db.flush()
+    
+    # Add creator as admin
+    membership = models.GroupMembership(
+        user_id=current.user_id,
+        group_id=group.group_id,
+        role=models.GroupMemberRole.ADMIN,
+        status=models.GroupMemberStatus.JOINED
+    )
+    db.add(membership)
+    
+    # Add rules
+    rules = payload.get("rules", [])
+    for idx, rule in enumerate(rules):
+        rule_obj = models.GroupRule(
+            group_id=group.group_id,
+            title=rule["title"],
+            details=rule.get("details"),
+            display_order=idx
+        )
+        db.add(rule_obj)
+    
+    # Add membership questions
+    questions = payload.get("questions", [])
+    for question in questions:
+        q_obj = models.MembershipQuestion(
+            group_id=group.group_id,
+            question_text=question["question_text"],
+            is_required=question.get("is_required", False)
+        )
+        db.add(q_obj)
+    
+    db.commit()
+    db.refresh(group)
+    
+    return {
+        "group_id": group.group_id,
+        "group_name": group.group_name,
+        "privacy_type": group.privacy_type,
+        "message": "Group created successfully"
     }
 
 @router.get("/groups/{group_id}/questions")
@@ -1495,16 +2090,65 @@ def join_group(group_id: int, payload: dict, request: Request, db: Session = Dep
     group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    status_val = models.GroupMemberStatus.JOINED if group.privacy_type == models.GroupPrivacy.PUBLIC else models.GroupMemberStatus.PENDING
-    gm = models.GroupMembership(user_id=current.user_id, group_id=group_id, role=models.GroupMemberRole.MEMBER, status=status_val)
-    db.merge(gm)
-    db.commit()
+    
+    # Check if user is banned
+    existing = db.query(models.GroupMembership).filter(
+        models.GroupMembership.user_id == current.user_id,
+        models.GroupMembership.group_id == group_id
+    ).first()
+    
+    if existing and existing.status == models.GroupMemberStatus.BANNED:
+        raise HTTPException(status_code=403, detail="You are banned from this group")
+    
+    # Check required questions
+    required_questions = db.query(models.MembershipQuestion).filter(
+        models.MembershipQuestion.group_id == group_id,
+        models.MembershipQuestion.is_required == True
+    ).all()
+    
     answers = payload.get("answers") or []
+    answered_question_ids = [ans["question_id"] for ans in answers]
+    
+    for req_q in required_questions:
+        if req_q.question_id not in answered_question_ids:
+            raise HTTPException(status_code=400, detail=f"Question '{req_q.question_text}' is required")
+    
+    # Determine status based on group privacy
+    status_val = models.GroupMemberStatus.JOINED if group.privacy_type == models.GroupPrivacy.PUBLIC else models.GroupMemberStatus.PENDING
+    
+    if existing:
+        existing.status = status_val
+        existing.role = models.GroupMemberRole.MEMBER
+    else:
+        gm = models.GroupMembership(
+            user_id=current.user_id,
+            group_id=group_id,
+            role=models.GroupMemberRole.MEMBER,
+            status=status_val
+        )
+        db.add(gm)
+    
+    # Save answers
     for ans in answers:
-        rec = models.MembershipAnswer(user_id=current.user_id, group_id=group_id, question_id=ans["question_id"], answer_text=ans["answer_text"])
-        db.merge(rec)
+        answer_obj = db.query(models.MembershipAnswer).filter(
+            models.MembershipAnswer.user_id == current.user_id,
+            models.MembershipAnswer.group_id == group_id,
+            models.MembershipAnswer.question_id == ans["question_id"]
+        ).first()
+        
+        if answer_obj:
+            answer_obj.answer_text = ans["answer_text"]
+        else:
+            rec = models.MembershipAnswer(
+                user_id=current.user_id,
+                group_id=group_id,
+                question_id=ans["question_id"],
+                answer_text=ans["answer_text"]
+            )
+            db.add(rec)
+    
     db.commit()
-    return {"status": status_val.value, "message": "Request sent" if status_val == models.GroupMemberStatus.PENDING else "Joined"}
+    return {"status": status_val.value, "message": "Request sent" if status_val == models.GroupMemberStatus.PENDING else "Joined successfully"}
 
 @router.delete("/groups/{group_id}/leave")
 def leave_group(group_id: int, request: Request, db: Session = Depends(get_db)):
@@ -1560,9 +2204,202 @@ def update_group_member(group_id: int, user_id: int, payload: dict, request: Req
         raise HTTPException(status_code=404, detail="Membership not found")
     if "status" in payload:
         gm.status = payload["status"]
+    if "role" in payload and admin_membership.role == models.GroupMemberRole.ADMIN:
+        gm.role = payload["role"]
     db.commit()
     db.refresh(gm)
-    return {"status": gm.status}
+    return {"status": gm.status, "role": gm.role}
+
+@router.post("/groups/{group_id}/members/{user_id}/approve")
+def approve_member(group_id: int, user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Approve pending member request"""
+    admin = get_current_user_from_cookie(request, db)
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission")
+    
+    gm = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == user_id
+    ).first()
+    if not gm:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    gm.status = models.GroupMemberStatus.JOINED
+    db.commit()
+    return {"message": "Member approved", "status": "JOINED"}
+
+@router.post("/groups/{group_id}/members/{user_id}/reject")
+def reject_member(group_id: int, user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Reject pending member request"""
+    admin = get_current_user_from_cookie(request, db)
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission")
+    
+    gm = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == user_id
+    ).first()
+    if gm:
+        db.delete(gm)
+        db.commit()
+    
+    return {"message": "Request rejected"}
+
+@router.post("/groups/{group_id}/members/{user_id}/ban")
+def ban_member(group_id: int, user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Ban a member from the group"""
+    admin = get_current_user_from_cookie(request, db)
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission")
+    
+    gm = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == user_id
+    ).first()
+    
+    if gm:
+        gm.status = models.GroupMemberStatus.BANNED
+    else:
+        gm = models.GroupMembership(
+            user_id=user_id,
+            group_id=group_id,
+            role=models.GroupMemberRole.MEMBER,
+            status=models.GroupMemberStatus.BANNED
+        )
+        db.add(gm)
+    
+    db.commit()
+    return {"message": "Member banned", "status": "BANNED"}
+
+@router.post("/groups/{group_id}/invite/{user_id}")
+def invite_friend_to_group(group_id: int, user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Admin/Moderator invites a friend to join the group"""
+    admin = get_current_user_from_cookie(request, db)
+    
+    # Check if requester is admin/moderator
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission to invite members")
+    
+    # Check if group exists
+    group = db.query(models.Group).filter(models.Group.group_id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if invitee exists
+    invitee = db.query(models.User).filter(models.User.user_id == user_id).first()
+    if not invitee:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if user is already a member or has pending request
+    existing = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == user_id
+    ).first()
+    
+    if existing:
+        if existing.status == models.GroupMemberStatus.JOINED:
+            raise HTTPException(status_code=400, detail="User is already a member")
+        elif existing.status == models.GroupMemberStatus.PENDING:
+            # Auto-approve if invited by admin
+            existing.status = models.GroupMemberStatus.JOINED
+            db.commit()
+            return {"message": "Pending request approved", "status": "JOINED"}
+        elif existing.status == models.GroupMemberStatus.BANNED:
+            raise HTTPException(status_code=400, detail="User is banned from this group")
+    
+    # Create new membership with JOINED status (direct invite)
+    membership = models.GroupMembership(
+        user_id=user_id,
+        group_id=group_id,
+        role=models.GroupMemberRole.MEMBER,
+        status=models.GroupMemberStatus.JOINED
+    )
+    db.add(membership)
+    db.commit()
+    
+    return {
+        "message": f"Successfully invited {invitee.full_name or invitee.username} to the group",
+        "status": "JOINED"
+    }
+
+@router.post("/groups/{group_id}/members/{user_id}/unban")
+def unban_member(group_id: int, user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Unban a member from the group"""
+    admin = get_current_user_from_cookie(request, db)
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission")
+    
+    gm = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == user_id,
+        models.GroupMembership.status == models.GroupMemberStatus.BANNED
+    ).first()
+    
+    if gm:
+        db.delete(gm)
+        db.commit()
+    
+    return {"message": "Member unbanned"}
+
+@router.get("/groups/{group_id}/pending-requests")
+def get_pending_requests(group_id: int, request: Request, db: Session = Depends(get_db)):
+    """Get pending join requests for a group (admin/moderator only)"""
+    admin = get_current_user_from_cookie(request, db)
+    admin_membership = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.user_id == admin.user_id,
+    ).first()
+    if not admin_membership or admin_membership.role not in [models.GroupMemberRole.ADMIN, models.GroupMemberRole.MODERATOR]:
+        raise HTTPException(status_code=403, detail="No permission")
+    
+    pending = db.query(models.GroupMembership).filter(
+        models.GroupMembership.group_id == group_id,
+        models.GroupMembership.status == models.GroupMemberStatus.PENDING
+    ).all()
+    
+    result = []
+    for p in pending:
+        profile = db.query(models.Profile).filter(models.Profile.user_id == p.user_id).first()
+        answers = db.query(models.MembershipAnswer).filter(
+            models.MembershipAnswer.user_id == p.user_id,
+            models.MembershipAnswer.group_id == group_id
+        ).all()
+        
+        user_name = None
+        user_avatar = None
+        if profile:
+            user_name = f"{profile.first_name} {profile.last_name}".strip()
+            user_avatar = profile.profile_picture_url
+        
+        result.append({
+            "user_id": p.user_id,
+            "user_name": user_name,
+            "user_avatar": user_avatar,
+            "joined_at": p.joined_at,
+            "answers": [{"question_id": a.question_id, "answer_text": a.answer_text} for a in answers]
+        })
+    
+    return result
 
 # --- Pages ---
 @router.get("/pages/{page_id}")
@@ -1573,7 +2410,21 @@ def get_page(page_id: int, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Page not found")
     role = db.query(models.PageRole).filter(models.PageRole.user_id == current.user_id, models.PageRole.page_id == page_id).first()
     follow = db.query(models.PageFollow).filter(models.PageFollow.user_id == current.user_id, models.PageFollow.page_id == page_id).first()
-    return {"page_id": page.page_id, "name": page.page_name, "is_followed": bool(follow), "my_role": getattr(role, "role", None)}
+    
+    # Count followers
+    follower_count = db.query(models.PageFollow).filter(models.PageFollow.page_id == page_id).count()
+    
+    return {
+        "page_id": page.page_id,
+        "name": page.page_name,
+        "username": page.username,
+        "category": page.category,
+        "description": page.description,
+        "contact_info": page.contact_info,
+        "follower_count": follower_count,
+        "is_followed": bool(follow),
+        "my_role": getattr(role, "role", None)
+    }
 
 @router.post("/pages/{page_id}/follow")
 def follow_page(page_id: int, request: Request, db: Session = Depends(get_db)):
@@ -1592,14 +2443,86 @@ def unfollow_page(page_id: int, request: Request, db: Session = Depends(get_db))
     return {"status": "UNFOLLOWED"}
 
 @router.get("/pages/{page_id}/posts")
-def page_posts(page_id: int, db: Session = Depends(get_db), limit: int = 10, last_post_id: Optional[int] = None):
-    q = db.query(models.Post).join(models.PostLocation, models.PostLocation.post_id == models.Post.post_id).filter(
+def page_posts(page_id: int, db: Session = Depends(get_db), request: Request = None, limit: int = 10, last_post_id: Optional[int] = None):
+    """Get formatted posts for a page with author and file information"""
+    current = None
+    if request:
+        try:
+            current = get_current_user_from_cookie(request, db)
+        except HTTPException:
+            pass
+    viewer_id = getattr(current, "user_id", None)
+    
+    # Get page info
+    page = db.query(models.Page).filter(models.Page.page_id == page_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    
+    q = db.query(models.Post).join(
+        models.PostLocation, models.PostLocation.post_id == models.Post.post_id
+    ).filter(
         models.PostLocation.location_type == models.LocationType.PAGE_TIMELINE,
         models.PostLocation.location_id == page_id,
     )
     if last_post_id:
         q = q.filter(models.Post.post_id < last_post_id)
-    return q.order_by(desc(models.Post.created_at)).limit(limit).all()
+    
+    posts = q.order_by(desc(models.Post.created_at)).limit(limit).all()
+    
+    # Format posts with page information
+    formatted_posts = []
+    for post in posts:
+        # Get files
+        files_q = db.query(models.File).join(
+            models.PostFile, models.PostFile.file_id == models.File.file_id
+        ).filter(models.PostFile.post_id == post.post_id)
+        files = files_q.all()
+        
+        # Get stats
+        like_count = db.query(models.Reaction).filter(
+            models.Reaction.reactable_id == post.post_id,
+            models.Reaction.reactable_type == models.ReactionTargetType.POST
+        ).count()
+        
+        comment_count = db.query(models.Comment).filter(
+            models.Comment.commentable_id == post.post_id,
+            models.Comment.commentable_type == models.CommentableType.POST
+        ).count()
+        
+        is_liked = False
+        if viewer_id:
+            is_liked = db.query(models.Reaction).filter(
+                models.Reaction.reactor_user_id == viewer_id,
+                models.Reaction.reactable_id == post.post_id,
+                models.Reaction.reactable_type == models.ReactionTargetType.POST
+            ).first() is not None
+        
+        formatted_posts.append({
+            "post_id": post.post_id,
+            "text_content": post.text_content,
+            "created_at": post.created_at,
+            "privacy_setting": "PUBLIC",
+            "author_id": page_id,
+            "author_name": page.page_name,
+            "author_avatar": None,
+            "files": [
+                {
+                    "file_id": f.file_id,
+                    "file_url": f.file_url,
+                    "file_name": f.file_name,
+                    "file_type": f.file_type,
+                    "kind": "IMAGE" if f.file_type.startswith("image/") else "VIDEO" if f.file_type.startswith("video/") else "FILE"
+                }
+                for f in files
+            ],
+            "stats": {
+                "likes": like_count,
+                "comments": comment_count
+            },
+            "is_liked_by_me": is_liked
+        })
+    
+    return formatted_posts
 
 @router.get("/pages/{page_id}/roles")
 def page_roles(page_id: int, request: Request, db: Session = Depends(get_db)):
@@ -1629,6 +2552,11 @@ def remove_page_role(page_id: int, user_id: int, request: Request, db: Session =
     admin_role = db.query(models.PageRole).filter(models.PageRole.user_id == admin.user_id, models.PageRole.page_id == page_id, models.PageRole.role == models.PageRoleEnum.ADMIN).first()
     if not admin_role:
         raise HTTPException(status_code=403, detail="No permission")
+    
+    # Prevent admin from removing themselves
+    if user_id == admin.user_id:
+        raise HTTPException(status_code=400, detail="Cannot remove yourself from the page")
+    
     rec = db.query(models.PageRole).filter(models.PageRole.user_id == user_id, models.PageRole.page_id == page_id).first()
     if rec:
         db.delete(rec)
@@ -1642,10 +2570,211 @@ def my_pages(request: Request, db: Session = Depends(get_db)):
     return [{"page_id": p.page_id, "name": p.page_name, "role": pr.role} for pr, p in roles]
 
 # --- Events ---
+@router.post("/events", status_code=status.HTTP_201_CREATED)
+def create_event(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Create a new event"""
+    current = get_current_user_from_cookie(request, db)
+    
+    # Validate host
+    host_id = payload.get("host_id")
+    host_type = payload.get("host_type")
+    
+    if host_type == models.PostAuthorType.USER:
+        if host_id != current.user_id:
+            raise HTTPException(status_code=403, detail="Cannot create event as another user")
+    elif host_type == models.PostAuthorType.PAGE:
+        # Check if user is admin/editor of the page
+        role = db.query(models.PageRole).filter(
+            models.PageRole.page_id == host_id,
+            models.PageRole.user_id == current.user_id,
+            models.PageRole.role_type.in_([models.PageRoleType.ADMIN, models.PageRoleType.EDITOR])
+        ).first()
+        if not role:
+            raise HTTPException(status_code=403, detail="Must be admin or editor to create page event")
+    
+    # Create event
+    event = models.Event(
+        host_id=host_id,
+        host_type=host_type,
+        event_name=payload["event_name"],
+        description=payload.get("description"),
+        start_time=payload["start_time"],
+        end_time=payload.get("end_time"),
+        location_text=payload.get("location_text"),
+        privacy_setting=payload.get("privacy_setting", models.EventPrivacy.PUBLIC)
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    
+    # Auto-RSVP creator as GOING
+    participant = models.EventParticipant(
+        event_id=event.event_id,
+        user_id=current.user_id,
+        rsvp_status=models.RSVPStatus.GOING
+    )
+    db.add(participant)
+    db.commit()
+    
+    return event
+
+@router.get("/events/{event_id}")
+def get_event(event_id: int, request: Request, db: Session = Depends(get_db)):
+    """Get event details with host info, participant counts, and user's RSVP"""
+    try:
+        current = get_current_user_from_cookie(request, db)
+        current_user_id = current.user_id
+    except:
+        current_user_id = None
+    
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Get host info
+    host_info = {}
+    if event.host_type == models.PostAuthorType.USER:
+        host = db.query(models.User).filter(models.User.user_id == event.host_id).first()
+        if host:
+            host_info = {
+                "host_id": host.user_id,
+                "host_type": "USER",
+                "name": f"{host.first_name} {host.last_name}",
+                "avatar": host.avatar_url
+            }
+    elif event.host_type == models.PostAuthorType.PAGE:
+        host = db.query(models.Page).filter(models.Page.page_id == event.host_id).first()
+        if host:
+            host_info = {
+                "host_id": host.page_id,
+                "host_type": "PAGE",
+                "name": host.page_name,
+                "avatar": host.avatar_url,
+                "username": host.page_username
+            }
+    
+    # Get participant counts
+    going_count = db.query(models.EventParticipant).filter(
+        models.EventParticipant.event_id == event_id,
+        models.EventParticipant.rsvp_status == models.RSVPStatus.GOING
+    ).count()
+    
+    interested_count = db.query(models.EventParticipant).filter(
+        models.EventParticipant.event_id == event_id,
+        models.EventParticipant.rsvp_status == models.RSVPStatus.INTERESTED
+    ).count()
+    
+    # Get current user's RSVP
+    user_rsvp = None
+    if current_user_id:
+        participant = db.query(models.EventParticipant).filter(
+            models.EventParticipant.event_id == event_id,
+            models.EventParticipant.user_id == current_user_id
+        ).first()
+        if participant:
+            user_rsvp = participant.rsvp_status.value
+    
+    return {
+        "event_id": event.event_id,
+        "host_id": event.host_id,
+        "host_type": event.host_type.value,
+        "event_name": event.event_name,
+        "description": event.description,
+        "start_time": event.start_time.isoformat() if event.start_time else None,
+        "end_time": event.end_time.isoformat() if event.end_time else None,
+        "location_text": event.location_text,
+        "privacy_setting": event.privacy_setting.value,
+        "host": host_info,
+        "going_count": going_count,
+        "interested_count": interested_count,
+        "user_rsvp": user_rsvp
+    }
+
+@router.put("/events/{event_id}")
+def update_event(event_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Update event - only host can update"""
+    current = get_current_user_from_cookie(request, db)
+    
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Check if user is the host or has permission
+    can_edit = False
+    if event.host_type == models.PostAuthorType.USER:
+        can_edit = event.host_id == current.user_id
+    elif event.host_type == models.PostAuthorType.PAGE:
+        role = db.query(models.PageRole).filter(
+            models.PageRole.page_id == event.host_id,
+            models.PageRole.user_id == current.user_id,
+            models.PageRole.role_type.in_([models.PageRoleType.ADMIN, models.PageRoleType.EDITOR])
+        ).first()
+        can_edit = role is not None
+    
+    if not can_edit:
+        raise HTTPException(status_code=403, detail="Only the host can update this event")
+    
+    # Update fields
+    if "event_name" in payload:
+        event.event_name = payload["event_name"]
+    if "description" in payload:
+        event.description = payload["description"]
+    if "start_time" in payload:
+        event.start_time = payload["start_time"]
+    if "end_time" in payload:
+        event.end_time = payload["end_time"]
+    if "location_text" in payload:
+        event.location_text = payload["location_text"]
+    if "privacy_setting" in payload:
+        event.privacy_setting = payload["privacy_setting"]
+    
+    db.commit()
+    db.refresh(event)
+    return event
+
+@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_event(event_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete event - only host can delete"""
+    current = get_current_user_from_cookie(request, db)
+    
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Check if user is the host or has permission
+    can_delete = False
+    if event.host_type == models.PostAuthorType.USER:
+        can_delete = event.host_id == current.user_id
+    elif event.host_type == models.PostAuthorType.PAGE:
+        role = db.query(models.PageRole).filter(
+            models.PageRole.page_id == event.host_id,
+            models.PageRole.user_id == current.user_id,
+            models.PageRole.role_type == models.PageRoleType.ADMIN
+        ).first()
+        can_delete = role is not None
+    
+    if not can_delete:
+        raise HTTPException(status_code=403, detail="Only the host can delete this event")
+    
+    # Delete participants first
+    db.query(models.EventParticipant).filter(models.EventParticipant.event_id == event_id).delete()
+    # Delete publications
+    db.query(models.EventPublication).filter(models.EventPublication.event_id == event_id).delete()
+    # Delete event
+    db.delete(event)
+    db.commit()
+    return None
+
 @router.post("/events/{event_id}/rsvp")
 def rsvp_event(event_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
     current = get_current_user_from_cookie(request, db)
     status_val = payload.get("status")
+    
+    # Check if event exists
+    event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
     rec = models.EventParticipant(event_id=event_id, user_id=current.user_id, rsvp_status=status_val)
     db.merge(rec)
     db.commit()
@@ -1653,21 +2782,119 @@ def rsvp_event(event_id: int, payload: dict, request: Request, db: Session = Dep
 
 @router.get("/events/{event_id}/participants")
 def event_participants(event_id: int, db: Session = Depends(get_db), status_filter: Optional[models.RSVPStatus] = None):
+    """Get event participants with user details"""
     q = db.query(models.EventParticipant).filter(models.EventParticipant.event_id == event_id)
     if status_filter:
         q = q.filter(models.EventParticipant.rsvp_status == status_filter)
-    return q.all()
+    
+    participants = q.all()
+    
+    # Format with user details
+    result = []
+    for p in participants:
+        user = db.query(models.User).filter(models.User.user_id == p.user_id).first()
+        if user:
+            result.append({
+                "user_id": user.user_id,
+                "name": f"{user.first_name} {user.last_name}",
+                "avatar": user.avatar_url,
+                "rsvp_status": p.rsvp_status.value,
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None
+            })
+    
+    return result
 
 @router.get("/events")
 def list_events(request: Request, db: Session = Depends(get_db), type: Optional[str] = None):
-    current = get_current_user_from_cookie(request, db)
-    if type == "HOSTING":
-        return db.query(models.Event).filter(models.Event.host_id == current.user_id).all()
-    if type == "GOING":
-        eps = db.query(models.EventParticipant).filter(models.EventParticipant.user_id == current.user_id).all()
+    """List events with host info and participant counts"""
+    try:
+        current = get_current_user_from_cookie(request, db)
+        current_user_id = current.user_id
+    except:
+        current_user_id = None
+    
+    # Filter events based on type
+    if type == "HOSTING" and current_user_id:
+        events = db.query(models.Event).filter(
+            models.Event.host_id == current_user_id,
+            models.Event.host_type == models.PostAuthorType.USER
+        ).all()
+    elif type == "GOING" and current_user_id:
+        eps = db.query(models.EventParticipant).filter(
+            models.EventParticipant.user_id == current_user_id,
+            models.EventParticipant.rsvp_status.in_([models.RSVPStatus.GOING, models.RSVPStatus.INTERESTED])
+        ).all()
         ids = [e.event_id for e in eps]
-        return db.query(models.Event).filter(models.Event.event_id.in_(ids)).all()
-    return db.query(models.Event).all()
+        events = db.query(models.Event).filter(models.Event.event_id.in_(ids)).all()
+    else:
+        # Get all public events
+        events = db.query(models.Event).filter(
+            models.Event.privacy_setting == models.EventPrivacy.PUBLIC
+        ).all()
+    
+    # Format events with host info and counts
+    result = []
+    for event in events:
+        # Get host info
+        host_info = {}
+        if event.host_type == models.PostAuthorType.USER:
+            host = db.query(models.User).filter(models.User.user_id == event.host_id).first()
+            if host:
+                host_info = {
+                    "host_id": host.user_id,
+                    "host_type": "USER",
+                    "name": f"{host.first_name} {host.last_name}",
+                    "avatar": host.avatar_url
+                }
+        elif event.host_type == models.PostAuthorType.PAGE:
+            host = db.query(models.Page).filter(models.Page.page_id == event.host_id).first()
+            if host:
+                host_info = {
+                    "host_id": host.page_id,
+                    "host_type": "PAGE",
+                    "name": host.page_name,
+                    "avatar": host.avatar_url,
+                    "username": host.page_username
+                }
+        
+        # Get participant counts
+        going_count = db.query(models.EventParticipant).filter(
+            models.EventParticipant.event_id == event.event_id,
+            models.EventParticipant.rsvp_status == models.RSVPStatus.GOING
+        ).count()
+        
+        interested_count = db.query(models.EventParticipant).filter(
+            models.EventParticipant.event_id == event.event_id,
+            models.EventParticipant.rsvp_status == models.RSVPStatus.INTERESTED
+        ).count()
+        
+        # Get current user's RSVP
+        user_rsvp = None
+        if current_user_id:
+            participant = db.query(models.EventParticipant).filter(
+                models.EventParticipant.event_id == event.event_id,
+                models.EventParticipant.user_id == current_user_id
+            ).first()
+            if participant:
+                user_rsvp = participant.rsvp_status.value
+        
+        result.append({
+            "event_id": event.event_id,
+            "host_id": event.host_id,
+            "host_type": event.host_type.value,
+            "event_name": event.event_name,
+            "description": event.description,
+            "start_time": event.start_time.isoformat() if event.start_time else None,
+            "end_time": event.end_time.isoformat() if event.end_time else None,
+            "location_text": event.location_text,
+            "privacy_setting": event.privacy_setting.value,
+            "host": host_info,
+            "going_count": going_count,
+            "interested_count": interested_count,
+            "user_rsvp": user_rsvp
+        })
+    
+    return result
 
 # --- Reports & admin ---
 @router.get("/reports/reasons")

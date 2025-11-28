@@ -27,6 +27,9 @@ export default function Header(){
               <Link to="/friends" className="btn btn-link text-decoration-none">
                 <i className="bi bi-people-fill" style={{fontSize: '1.25rem'}}>freinds</i>
               </Link>
+              <Link to={`/profile/${user.user_id}`} className="btn btn-link text-decoration-none">
+                <i className="bi bi-person-circle" style={{fontSize: '1.25rem'}}></i>
+              </Link>
               <span className="text-secondary">{user.name || user.first_name || user.email}</span>
               <button className="btn btn-outline-secondary btn-sm btn-pill" onClick={onLogout}>Logout</button>
             </div>

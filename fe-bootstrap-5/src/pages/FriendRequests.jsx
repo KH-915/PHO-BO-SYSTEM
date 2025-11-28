@@ -26,7 +26,7 @@ export default function FriendRequests() {
           <div key={req.user_id} className="col-12 col-md-4">
             <div className="card">
               <div className="card-body d-flex align-items-center">
-                <img src={req.profile_picture_url || 'https://via.placeholder.com/60'} className="rounded-circle me-3" width="60" height="60" />
+                <img src={req.profile_picture_url || '/default-avatar.png'} className="rounded-circle me-3" width="60" height="60" />
                 <div>
                   <h6 className="card-title mb-1">{req.first_name} {req.last_name}</h6>
                   <div className="d-flex gap-2 mt-2">

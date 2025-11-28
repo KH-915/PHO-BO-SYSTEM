@@ -8,14 +8,20 @@ import Register from './pages/Register'
 import Feed from './pages/Feed'
 import FriendManager from './pages/FriendManager' // This component handles Requests + Suggestions
 import GroupList from './pages/GroupList'
+import GroupDetail from './pages/GroupDetail'
+import ProfilePage from './pages/ProfilePage'
+import PageList from './pages/PageList'
+import PageDetail from './pages/PageDetail'
+import EventList from './pages/EventList'
+import EventDetail from './pages/EventDetail'
 import Layout from './components/Layout'
 
 // Protected Route Wrapper
 const ProtectedRoute = ({ children }) => {
-  const { user, loading } = useAuth()
+  const { user, isInitializing } = useAuth()
   
   // Show a loading spinner while checking auth status
-  if (loading) {
+  if (isInitializing) {
     return (
       <div className="d-flex justify-content-center align-items-center vh-100">
         <div className="spinner-border text-primary" role="status">
@@ -49,8 +55,19 @@ export default function App() {
           {/* Group List */}
           <Route path="/groups" element={<GroupList />} />
           
-          {/* Placeholder for Profile */}
-          <Route path="/profile/:id" element={<div className="text-center mt-5">Profile Page Coming Soon</div>} />
+          {/* Group Detail */}
+          <Route path="/groups/:groupId" element={<GroupDetail />} />
+          
+          {/* Profile Page */}
+          <Route path="/profile/:userId" element={<ProfilePage />} />
+          
+          {/* Pages */}
+          <Route path="/pages" element={<PageList />} />
+          <Route path="/pages/:pageId" element={<PageDetail />} />
+          
+          {/* Events */}
+          <Route path="/events" element={<EventList />} />
+          <Route path="/events/:eventId" element={<EventDetail />} />
           
         </Route>
       </Routes>

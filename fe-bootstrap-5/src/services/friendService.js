@@ -1,38 +1,31 @@
 import api from './api'
 
 export async function getSuggestions() {
-  const res = await api.get('/users/suggestions')
-  return res.data
+  return api.get('/users/suggestions')
 }
 
 export async function sendFriendRequest(targetId) {
-  const res = await api.post(`/friends/${targetId}`)
-  return res.data
+  return api.post(`/friends/${targetId}`)
 }
 
 export async function getFriendRequests(){
-  const res = await api.get('/friends/requests')
-  return res.data
+  return api.get('/friends/requests')
 }
 
 export async function getFriends(){
-  const res = await api.get('/friends')
-  return res.data
+  return api.get('/friends')
 }
 
 export async function acceptRequest(targetId){
-  const res = await api.put(`/friends/${targetId}/accept`)
-  return res.data
+  return api.put(`/friends/${targetId}/accept`)
 }
 
 export async function rejectRequest(targetId){
-  const res = await api.delete(`/friends/${targetId}/reject`)
-  return res.data
+  return api.delete(`/friends/${targetId}/reject`)
 }
 
 export async function unfriend(targetId){
-  const res = await api.delete(`/friends/${targetId}`)
-  return res.data
+  return api.delete(`/friends/${targetId}`)
 }
 
 export default {
