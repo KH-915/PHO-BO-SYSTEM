@@ -27,9 +27,25 @@ class UpdateUserRequest(BaseModel):
 
 @router.get("/users")
 def list_users(db: Session = Depends(get_db)):
-    """List all users from the database."""
+    """List all users with their roles (aggregated) from the database."""
     try:
-        result = db.execute(text("SELECT user_id, email, phone_number, is_active, created_at, last_login FROM users"))
+        result = db.execute(text(
+            """
+            SELECT 
+                u.user_id,
+                u.email,
+                u.phone_number,
+                u.is_active,
+                u.created_at,
+                u.last_login,
+                GROUP_CONCAT(r.role_name ORDER BY r.role_name SEPARATOR ', ') AS roles,
+                MIN(r.role_id) AS primary_role_id
+            FROM users u
+            LEFT JOIN user_roles ur ON ur.user_id = u.user_id
+            LEFT JOIN roles r ON r.role_id = ur.role_id
+            GROUP BY u.user_id
+            """
+        ))
         users = []
         for row in result:
             users.append({
@@ -40,6 +56,9 @@ def list_users(db: Session = Depends(get_db)):
                 "is_active": bool(row.is_active),
                 "created_at": str(row.created_at) if row.created_at else None,
                 "last_login": str(row.last_login) if row.last_login else None,
+                # New: roles display and primary role id for preselect
+                "roles": getattr(row, 'roles', None),
+                "primary_role_id": int(row.primary_role_id) if getattr(row, 'primary_role_id', None) is not None else None,
             })
         return users
     except SQLAlchemyError as e:
@@ -104,11 +123,11 @@ def list_roles(db: Session = Depends(get_db)):
         result = db.execute(text("SELECT role_id, role_name, description FROM roles"))
         roles = []
         for row in result:
-            roles.append({
-                "role_id": row.role_id if hasattr(row, 'role_id') else row[0],
-                "role_name": row.role_name if hasattr(row, 'role_name') else row[1],
-                "description": row.description if hasattr(row, 'description') else row[2],
-            })
+          roles.append({
+              "role_id": row.role_id if hasattr(row, 'role_id') else row[0],
+              "role_name": row.role_name if hasattr(row, 'role_name') else row[1],
+              "description": row.description if hasattr(row, 'description') else row[2],
+          })
         return roles
     except SQLAlchemyError as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

@@ -1,16 +1,32 @@
 import { useState, useEffect } from 'react';
-import { getUsers, createUser, deleteUser } from '../../services/adminService';
+import { getUsers, createUser, deleteUser, updateUser, getRoles } from '../../services/adminService';
 
 export default function UserManagement() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Add user modal state
   const [showAddModal, setShowAddModal] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', phone: '', password: '' });
   const [formError, setFormError] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
+
+  // Delete error
   const [deleteError, setDeleteError] = useState(null);
+
+  // Edit user modal state
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [editForm, setEditForm] = useState({ phone: '', is_active: true, role_id: '' });
+  const [editError, setEditError] = useState(null);
+  const [editLoading, setEditLoading] = useState(false);
+
+  // Roles
+  const [roles, setRoles] = useState([]);
+  const [rolesLoading, setRolesLoading] = useState(false);
+  const [rolesError, setRolesError] = useState(null);
 
   useEffect(() => {
     loadUsers();
@@ -26,6 +42,20 @@ export default function UserManagement() {
       setError(err.response?.data?.detail || 'Failed to load users');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const ensureRolesLoaded = async () => {
+    if (roles.length > 0) return;
+    try {
+      setRolesLoading(true);
+      setRolesError(null);
+      const data = await getRoles();
+      setRoles(data || []);
+    } catch (err) {
+      setRolesError(err.response?.data?.detail || 'Failed to load roles');
+    } finally {
+      setRolesLoading(false);
     }
   };
 
@@ -54,18 +84,52 @@ export default function UserManagement() {
       await deleteUser(userId);
       await loadUsers();
     } catch (err) {
-      // Show MySQL constraint error to user
       const errorMessage = err.response?.data?.detail || 'Failed to delete user';
       setDeleteError(errorMessage);
-
-      // Auto-hide after 10 seconds
       setTimeout(() => setDeleteError(null), 10000);
+    }
+  };
+
+  const openEditUser = async (user) => {
+    setSelectedUser(user);
+    setEditForm({
+      phone: user.phone || '',
+      is_active: !!user.is_active,
+      // Preselect current role if available
+      role_id: user.primary_role_id != null ? String(user.primary_role_id) : ''
+    });
+    setEditError(null);
+    setShowEditModal(true);
+    await ensureRolesLoaded();
+  };
+
+  const handleEditUser = async (e) => {
+    e.preventDefault();
+    if (!selectedUser) return;
+
+    setEditError(null);
+    setEditLoading(true);
+
+    try {
+      const payload = {
+        phone: editForm.phone,
+        is_active: !!editForm.is_active,
+        role_id: editForm.role_id === '' ? null : Number(editForm.role_id)
+      };
+      await updateUser(selectedUser.id, payload);
+      setShowEditModal(false);
+      setSelectedUser(null);
+      await loadUsers();
+    } catch (err) {
+      setEditError(err.response?.data?.detail || 'Failed to update user');
+    } finally {
+      setEditLoading(false);
     }
   };
 
   const filteredUsers = users.filter(user =>
     user.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    user.phone?.toLowerCase().includes(searchTerm.toLowerCase())
+    (user.phone ? String(user.phone).toLowerCase().includes(searchTerm.toLowerCase()) : false)
   );
 
   if (loading) {
@@ -122,6 +186,8 @@ export default function UserManagement() {
               <th>ID</th>
               <th>Email</th>
               <th>Phone</th>
+              <th>Role</th>
+              <th>Active</th>
               <th>Created At</th>
               <th>Actions</th>
             </tr>
@@ -132,8 +198,23 @@ export default function UserManagement() {
                 <td>{user.id}</td>
                 <td>{user.email}</td>
                 <td>{user.phone || '-'}</td>
-                <td>{user.created_at ? new Date(user.created_at).toLocaleDateString() : '-'}</td>
+                <td>{user.roles || '-'}</td>
                 <td>
+                  {user.is_active ? (
+                    <span className="badge bg-success">Active</span>
+                  ) : (
+                    <span className="badge bg-secondary">Inactive</span>
+                  )}
+                </td>
+                <td>{user.created_at ? new Date(user.created_at).toLocaleDateString() : '-'}</td>
+                <td className="d-flex gap-2">
+                  <button
+                    className="btn btn-sm btn-outline-primary"
+                    onClick={() => openEditUser(user)}
+                  >
+                    <i className="bi bi-pencil-square me-1"></i>
+                    Edit
+                  </button>
                   <button
                     className="btn btn-sm btn-danger"
                     onClick={() => handleDeleteUser(user.id)}
@@ -146,7 +227,7 @@ export default function UserManagement() {
             ))}
             {filteredUsers.length === 0 && (
               <tr>
-                <td colSpan="5" className="text-center text-muted">
+                <td colSpan="7" className="text-center text-muted">
                   No users found
                 </td>
               </tr>
@@ -231,6 +312,109 @@ export default function UserManagement() {
                         </>
                       ) : (
                         'Create User'
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+          <div className="modal-backdrop show"></div>
+        </>
+      )}
+
+      {/* Edit User Modal */}
+      {showEditModal && selectedUser && (
+        <>
+          <div className="modal show d-block" tabIndex="-1">
+            <div className="modal-dialog">
+              <div className="modal-content">
+                <div className="modal-header">
+                  <h5 className="modal-title">Edit User (ID: {selectedUser.id})</h5>
+                  <button
+                    type="button"
+                    className="btn-close"
+                    onClick={() => {
+                      setShowEditModal(false);
+                      setEditError(null);
+                      setSelectedUser(null);
+                    }}
+                  ></button>
+                </div>
+                <form onSubmit={handleEditUser}>
+                  <div className="modal-body">
+                    {editError && (
+                      <div className="alert alert-danger">{editError}</div>
+                    )}
+                    <div className="mb-3">
+                      <label className="form-label">Email</label>
+                      <input type="text" className="form-control" value={selectedUser.email} readOnly />
+                    </div>
+                    <div className="mb-3">
+                      <label className="form-label">Phone</label>
+                      <input
+                        type="text"
+                        className="form-control"
+                        value={editForm.phone}
+                        onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
+                      />
+                      <div className="form-text">Leave empty to clear phone number.</div>
+                    </div>
+                    <div className="form-check form-switch mb-3">
+                      <input
+                        className="form-check-input"
+                        type="checkbox"
+                        role="switch"
+                        id="isActiveSwitch"
+                        checked={!!editForm.is_active}
+                        onChange={(e) => setEditForm({ ...editForm, is_active: e.target.checked })}
+                      />
+                      <label className="form-check-label" htmlFor="isActiveSwitch">Active</label>
+                    </div>
+                    <div className="mb-3">
+                      <label className="form-label">Grant Role (optional)</label>
+                      <select
+                        className="form-select"
+                        value={editForm.role_id}
+                        onChange={(e) => setEditForm({ ...editForm, role_id: e.target.value })}
+                        disabled={rolesLoading}
+                      >
+                        <option value="">No change</option>
+                        {roles.map(r => (
+                          <option key={r.role_id} value={r.role_id}>
+                            {r.role_name}
+                          </option>
+                        ))}
+                      </select>
+                      {rolesLoading && (
+                        <div className="form-text">Loading roles...</div>
+                      )}
+                      {rolesError && (
+                        <div className="text-danger small mt-1">{rolesError}</div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="modal-footer">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => {
+                        setShowEditModal(false);
+                        setEditError(null);
+                        setSelectedUser(null);
+                      }}
+                      disabled={editLoading}
+                    >
+                      Cancel
+                    </button>
+                    <button type="submit" className="btn btn-primary" disabled={editLoading}>
+                      {editLoading ? (
+                        <>
+                          <span className="spinner-border spinner-border-sm me-2"></span>
+                          Saving...
+                        </>
+                      ) : (
+                        'Save Changes'
                       )}
                     </button>
                   </div>
