@@ -32,7 +32,11 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 cd backend
 python -m app.seed_data
 ```
-This creates a small set of users, roles, a page, a group, a post with a file, a comment, a reaction, an event, and a report to make the API easy to explore.
+This now seeds at least 7 records per table with linked users, pages, groups, posts/files/comments/reactions, events, and reports.  
+To clear all seeded rows:
+```bash
+python -m app.seed_data --clear
+```
 
 ## Quick endpoints to try (with the seed data)
 - `GET /users` — list seeded users.
