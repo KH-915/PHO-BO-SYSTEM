@@ -57,7 +57,7 @@ export default function UserManagement() {
       // Show MySQL constraint error to user
       const errorMessage = err.response?.data?.detail || 'Failed to delete user';
       setDeleteError(errorMessage);
-      
+
       // Auto-hide after 10 seconds
       setTimeout(() => setDeleteError(null), 10000);
     }

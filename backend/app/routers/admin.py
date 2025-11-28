@@ -17,8 +17,12 @@ class CreateUserRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
+    # Phone is optional; empty string should be treated as NULL
     phone: Optional[str] = None
-    is_active: Optional[bool] = None
+    # is_active should be provided explicitly for the stored procedure
+    is_active: bool
+    # Optional role to grant; pass null to skip role update
+    role_id: Optional[int] = None
 
 
 @router.get("/users")
@@ -29,9 +33,10 @@ def list_users(db: Session = Depends(get_db)):
         users = []
         for row in result:
             users.append({
-                "user_id": row.user_id,
+                # Frontend expects these keys
+                "id": row.user_id,
                 "email": row.email,
-                "phone_number": row.phone_number,
+                "phone": row.phone_number,
                 "is_active": bool(row.is_active),
                 "created_at": str(row.created_at) if row.created_at else None,
                 "last_login": str(row.last_login) if row.last_login else None,
@@ -63,10 +68,12 @@ def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
 def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(get_db)):
     """Update a user by calling the stored procedure sp_update_user."""
     try:
-        # Call stored procedure: sp_update_user(user_id, phone, is_active)
+        # Normalize empty phone to NULL
+        phone = payload.phone if (payload.phone is not None and payload.phone != "") else None
+        # Call stored procedure: sp_update_user(user_id, phone, is_active, role_id)
         db.execute(
-            text("CALL sp_update_user(:user_id, :phone, :is_active)"),
-            {"user_id": user_id, "phone": payload.phone, "is_active": payload.is_active}
+            text("CALL sp_update_user(:user_id, :phone, :is_active, :role_id)"),
+            {"user_id": user_id, "phone": phone, "is_active": payload.is_active, "role_id": payload.role_id}
         )
         db.commit()
         return {"message": "User updated successfully"}
@@ -88,6 +95,23 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
         # Extract the MySQL error message (e.g., "Cannot delete user who owns a group")
         error_msg = str(e.orig) if hasattr(e, 'orig') else str(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg)
+
+
+@router.get("/roles")
+def list_roles(db: Session = Depends(get_db)):
+    """Return all available roles."""
+    try:
+        result = db.execute(text("SELECT role_id, role_name, description FROM roles"))
+        roles = []
+        for row in result:
+            roles.append({
+                "role_id": row.role_id if hasattr(row, 'role_id') else row[0],
+                "role_name": row.role_name if hasattr(row, 'role_name') else row[1],
+                "description": row.description if hasattr(row, 'description') else row[2],
+            })
+        return roles
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/stats")

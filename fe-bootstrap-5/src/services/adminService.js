@@ -10,8 +10,18 @@ export const createUser = async (userData) => {
   return response.data;
 };
 
+export const updateUser = async (userId, data) => {
+  const response = await api.put(`/admin/users/${userId}`, data);
+  return response.data;
+};
+
 export const deleteUser = async (userId) => {
   const response = await api.delete(`/admin/users/${userId}`);
+  return response.data;
+};
+
+export const getRoles = async () => {
+  const response = await api.get('/admin/roles');
   return response.data;
 };
 

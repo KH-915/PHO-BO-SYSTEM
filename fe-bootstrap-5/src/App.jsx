@@ -15,11 +15,14 @@ import PageDetail from './pages/PageDetail'
 import EventList from './pages/EventList'
 import EventDetail from './pages/EventDetail'
 import Layout from './components/Layout'
+import AdminLayout from './pages/admin/AdminLayout'
+import Statistics from './pages/admin/Statistics'
+import UserManagement from './pages/admin/UserManagement'
 
 // Protected Route Wrapper
 const ProtectedRoute = ({ children }) => {
   const { user, isInitializing } = useAuth()
-  
+
   // Show a loading spinner while checking auth status
   if (isInitializing) {
     return (
@@ -30,7 +33,7 @@ const ProtectedRoute = ({ children }) => {
       </div>
     )
   }
-  
+
   if (!user) return <Navigate to="/login" />
   return children
 }
@@ -45,30 +48,37 @@ export default function App() {
 
         {/* Protected Routes (Wrapped in Layout) */}
         <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-          
+
           {/* Home / Feed */}
           <Route path="/" element={<Feed />} />
-          
+
           {/* Friend Manager (Handles Requests & Suggestions) */}
           <Route path="/friends" element={<FriendManager />} />
-          
+
           {/* Group List */}
           <Route path="/groups" element={<GroupList />} />
-          
+
           {/* Group Detail */}
           <Route path="/groups/:groupId" element={<GroupDetail />} />
-          
+
           {/* Profile Page */}
           <Route path="/profile/:userId" element={<ProfilePage />} />
-          
+
           {/* Pages */}
           <Route path="/pages" element={<PageList />} />
           <Route path="/pages/:pageId" element={<PageDetail />} />
-          
+
           {/* Events */}
           <Route path="/events" element={<EventList />} />
           <Route path="/events/:eventId" element={<EventDetail />} />
-          
+
+        </Route>
+
+        {/* Admin Routes */}
+        <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
+          <Route index element={<Statistics />} />
+          <Route path="stats" element={<Statistics />} />
+          <Route path="users" element={<UserManagement />} />
         </Route>
       </Routes>
     </AuthProvider>
