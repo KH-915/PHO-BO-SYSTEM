@@ -165,13 +165,26 @@ def auth_register(payload: dict, response: Response, db: Session = Depends(get_d
             samesite="lax",
             max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60
         )
+        
+        # Fetch user roles (will be empty for new users unless default role is assigned)
+        user_roles = (
+            db.query(models.Role)
+            .join(models.UserRole, models.UserRole.role_id == models.Role.role_id)
+            .filter(models.UserRole.user_id == user.user_id)
+            .all()
+        )
+        roles = [{"role_id": role.role_id, "role_name": role.role_name} for role in user_roles]
+        is_admin = any(role.role_name.lower() == "system admin" for role in user_roles)
+        
         return {
             "message": "Đăng ký thành công",
             "user": {
                 "user_id": user.user_id,
                 "email": user.email,
                 "first_name": first_name,
-                "last_name": last_name
+                "last_name": last_name,
+                "roles": roles,
+                "is_admin": is_admin
             }
         }
 
@@ -193,7 +206,18 @@ def auth_login(payload: dict, response: Response, db: Session = Depends(get_db))
 
     # return user info
     profile = db.query(models.Profile).filter(models.Profile.user_id == user.user_id).first()
-    user_info = {"user_id": user.user_id, "email": user.email}
+    
+    # Fetch user roles
+    user_roles = (
+        db.query(models.Role)
+        .join(models.UserRole, models.UserRole.role_id == models.Role.role_id)
+        .filter(models.UserRole.user_id == user.user_id)
+        .all()
+    )
+    roles = [{"role_id": role.role_id, "role_name": role.role_name} for role in user_roles]
+    is_admin = any(role.role_name.lower() == "system admin" for role in user_roles)
+    
+    user_info = {"user_id": user.user_id, "email": user.email, "roles": roles, "is_admin": is_admin}
     if profile:
         user_info.update({"first_name": profile.first_name, "last_name": profile.last_name})
     return {"access_token": token, "token_type": "Bearer", "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES*60, "user": user_info}
@@ -208,12 +232,27 @@ def auth_logout(response: Response):
 
 @router.get('/users/me')
 def users_me(request: Request, db: Session = Depends(get_db)):
+    """Get current user information including roles"""
     user = get_current_user_from_cookie(request, db)
     profile = db.query(models.Profile).filter(models.Profile.user_id == user.user_id).first()
+
+    # Fetch user roles
+    user_roles = (
+        db.query(models.Role)
+        .join(models.UserRole, models.UserRole.role_id == models.Role.role_id)
+        .filter(models.UserRole.user_id == user.user_id)
+        .all()
+    )
+    roles = [{"role_id": role.role_id, "role_name": role.role_name} for role in user_roles]
+    is_admin = any(role.role_name.lower() == "system admin" for role in user_roles)
+    
+    print(f"DEBUG /users/me - User ID: {user.user_id}, Roles: {roles}, Is Admin: {is_admin}")
 
     data = {
         "user_id": user.user_id,
         "email": user.email,
+        "roles": roles,
+        "is_admin": is_admin,
     }
 
     if profile:
@@ -1996,20 +2035,20 @@ def get_all_groups(db: Session = Depends(get_db)):
     groups = db.query(models.Group).filter(
         models.Group.is_visible == True
     ).all()
-    
+
     result = []
     for group in groups:
         member_count = db.query(models.GroupMembership).filter(
             models.GroupMembership.group_id == group.group_id,
             models.GroupMembership.status == models.GroupMemberStatus.JOINED
         ).count()
-        
+
         creator = db.query(models.User).filter(models.User.user_id == group.creator_user_id).first()
         creator_profile = db.query(models.Profile).filter(models.Profile.user_id == group.creator_user_id).first() if creator else None
         creator_name = None
         if creator_profile:
             creator_name = ((creator_profile.first_name or '') + ' ' + (creator_profile.last_name or '')).strip() or None
-        
+
         result.append({
             "group_id": group.group_id,
             "group_name": group.group_name,
@@ -2020,7 +2059,7 @@ def get_all_groups(db: Session = Depends(get_db)):
             "creator_name": creator_name,
             "created_at": group.created_at.isoformat() if group.created_at else None
         })
-    
+
     return result
 
 @router.post("/groups", status_code=status.HTTP_201_CREATED)
@@ -2410,10 +2449,10 @@ def get_page(page_id: int, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Page not found")
     role = db.query(models.PageRole).filter(models.PageRole.user_id == current.user_id, models.PageRole.page_id == page_id).first()
     follow = db.query(models.PageFollow).filter(models.PageFollow.user_id == current.user_id, models.PageFollow.page_id == page_id).first()
-    
+
     # Count followers
     follower_count = db.query(models.PageFollow).filter(models.PageFollow.page_id == page_id).count()
-    
+
     return {
         "page_id": page.page_id,
         "name": page.page_name,
@@ -2452,12 +2491,12 @@ def page_posts(page_id: int, db: Session = Depends(get_db), request: Request = N
         except HTTPException:
             pass
     viewer_id = getattr(current, "user_id", None)
-    
+
     # Get page info
     page = db.query(models.Page).filter(models.Page.page_id == page_id).first()
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
-    
+
     q = db.query(models.Post).join(
         models.PostLocation, models.PostLocation.post_id == models.Post.post_id
     ).filter(
@@ -2466,9 +2505,9 @@ def page_posts(page_id: int, db: Session = Depends(get_db), request: Request = N
     )
     if last_post_id:
         q = q.filter(models.Post.post_id < last_post_id)
-    
+
     posts = q.order_by(desc(models.Post.created_at)).limit(limit).all()
-    
+
     # Format posts with page information
     formatted_posts = []
     for post in posts:
@@ -2477,18 +2516,18 @@ def page_posts(page_id: int, db: Session = Depends(get_db), request: Request = N
             models.PostFile, models.PostFile.file_id == models.File.file_id
         ).filter(models.PostFile.post_id == post.post_id)
         files = files_q.all()
-        
+
         # Get stats
         like_count = db.query(models.Reaction).filter(
             models.Reaction.reactable_id == post.post_id,
             models.Reaction.reactable_type == models.ReactionTargetType.POST
         ).count()
-        
+
         comment_count = db.query(models.Comment).filter(
             models.Comment.commentable_id == post.post_id,
             models.Comment.commentable_type == models.CommentableType.POST
         ).count()
-        
+
         is_liked = False
         if viewer_id:
             is_liked = db.query(models.Reaction).filter(
@@ -2496,7 +2535,7 @@ def page_posts(page_id: int, db: Session = Depends(get_db), request: Request = N
                 models.Reaction.reactable_id == post.post_id,
                 models.Reaction.reactable_type == models.ReactionTargetType.POST
             ).first() is not None
-        
+
         formatted_posts.append({
             "post_id": post.post_id,
             "text_content": post.text_content,
@@ -2521,7 +2560,7 @@ def page_posts(page_id: int, db: Session = Depends(get_db), request: Request = N
             },
             "is_liked_by_me": is_liked
         })
-    
+
     return formatted_posts
 
 @router.get("/pages/{page_id}/roles")
@@ -2552,11 +2591,11 @@ def remove_page_role(page_id: int, user_id: int, request: Request, db: Session =
     admin_role = db.query(models.PageRole).filter(models.PageRole.user_id == admin.user_id, models.PageRole.page_id == page_id, models.PageRole.role == models.PageRoleEnum.ADMIN).first()
     if not admin_role:
         raise HTTPException(status_code=403, detail="No permission")
-    
+
     # Prevent admin from removing themselves
     if user_id == admin.user_id:
         raise HTTPException(status_code=400, detail="Cannot remove yourself from the page")
-    
+
     rec = db.query(models.PageRole).filter(models.PageRole.user_id == user_id, models.PageRole.page_id == page_id).first()
     if rec:
         db.delete(rec)
@@ -2574,11 +2613,11 @@ def my_pages(request: Request, db: Session = Depends(get_db)):
 def create_event(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Create a new event"""
     current = get_current_user_from_cookie(request, db)
-    
+
     # Validate host
     host_id = payload.get("host_id")
     host_type = payload.get("host_type")
-    
+
     if host_type == models.PostAuthorType.USER:
         if host_id != current.user_id:
             raise HTTPException(status_code=403, detail="Cannot create event as another user")
@@ -2591,7 +2630,7 @@ def create_event(payload: dict, request: Request, db: Session = Depends(get_db))
         ).first()
         if not role:
             raise HTTPException(status_code=403, detail="Must be admin or editor to create page event")
-    
+
     # Create event
     event = models.Event(
         host_id=host_id,
@@ -2606,7 +2645,7 @@ def create_event(payload: dict, request: Request, db: Session = Depends(get_db))
     db.add(event)
     db.commit()
     db.refresh(event)
-    
+
     # Auto-RSVP creator as GOING
     participant = models.EventParticipant(
         event_id=event.event_id,
@@ -2615,7 +2654,7 @@ def create_event(payload: dict, request: Request, db: Session = Depends(get_db))
     )
     db.add(participant)
     db.commit()
-    
+
     return event
 
 @router.get("/events/{event_id}")
@@ -2626,11 +2665,11 @@ def get_event(event_id: int, request: Request, db: Session = Depends(get_db)):
         current_user_id = current.user_id
     except:
         current_user_id = None
-    
+
     event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     # Get host info
     host_info = {}
     if event.host_type == models.PostAuthorType.USER:
@@ -2652,18 +2691,18 @@ def get_event(event_id: int, request: Request, db: Session = Depends(get_db)):
                 "avatar": host.avatar_url,
                 "username": host.page_username
             }
-    
+
     # Get participant counts
     going_count = db.query(models.EventParticipant).filter(
         models.EventParticipant.event_id == event_id,
         models.EventParticipant.rsvp_status == models.RSVPStatus.GOING
     ).count()
-    
+
     interested_count = db.query(models.EventParticipant).filter(
         models.EventParticipant.event_id == event_id,
         models.EventParticipant.rsvp_status == models.RSVPStatus.INTERESTED
     ).count()
-    
+
     # Get current user's RSVP
     user_rsvp = None
     if current_user_id:
@@ -2673,7 +2712,7 @@ def get_event(event_id: int, request: Request, db: Session = Depends(get_db)):
         ).first()
         if participant:
             user_rsvp = participant.rsvp_status.value
-    
+
     return {
         "event_id": event.event_id,
         "host_id": event.host_id,
@@ -2694,11 +2733,11 @@ def get_event(event_id: int, request: Request, db: Session = Depends(get_db)):
 def update_event(event_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
     """Update event - only host can update"""
     current = get_current_user_from_cookie(request, db)
-    
+
     event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     # Check if user is the host or has permission
     can_edit = False
     if event.host_type == models.PostAuthorType.USER:
@@ -2710,10 +2749,10 @@ def update_event(event_id: int, payload: dict, request: Request, db: Session = D
             models.PageRole.role_type.in_([models.PageRoleType.ADMIN, models.PageRoleType.EDITOR])
         ).first()
         can_edit = role is not None
-    
+
     if not can_edit:
         raise HTTPException(status_code=403, detail="Only the host can update this event")
-    
+
     # Update fields
     if "event_name" in payload:
         event.event_name = payload["event_name"]
@@ -2727,7 +2766,7 @@ def update_event(event_id: int, payload: dict, request: Request, db: Session = D
         event.location_text = payload["location_text"]
     if "privacy_setting" in payload:
         event.privacy_setting = payload["privacy_setting"]
-    
+
     db.commit()
     db.refresh(event)
     return event
@@ -2736,11 +2775,11 @@ def update_event(event_id: int, payload: dict, request: Request, db: Session = D
 def delete_event(event_id: int, request: Request, db: Session = Depends(get_db)):
     """Delete event - only host can delete"""
     current = get_current_user_from_cookie(request, db)
-    
+
     event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     # Check if user is the host or has permission
     can_delete = False
     if event.host_type == models.PostAuthorType.USER:
@@ -2752,10 +2791,10 @@ def delete_event(event_id: int, request: Request, db: Session = Depends(get_db))
             models.PageRole.role_type == models.PageRoleType.ADMIN
         ).first()
         can_delete = role is not None
-    
+
     if not can_delete:
         raise HTTPException(status_code=403, detail="Only the host can delete this event")
-    
+
     # Delete participants first
     db.query(models.EventParticipant).filter(models.EventParticipant.event_id == event_id).delete()
     # Delete publications
@@ -2769,12 +2808,12 @@ def delete_event(event_id: int, request: Request, db: Session = Depends(get_db))
 def rsvp_event(event_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
     current = get_current_user_from_cookie(request, db)
     status_val = payload.get("status")
-    
+
     # Check if event exists
     event = db.query(models.Event).filter(models.Event.event_id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     rec = models.EventParticipant(event_id=event_id, user_id=current.user_id, rsvp_status=status_val)
     db.merge(rec)
     db.commit()
@@ -2786,9 +2825,9 @@ def event_participants(event_id: int, db: Session = Depends(get_db), status_filt
     q = db.query(models.EventParticipant).filter(models.EventParticipant.event_id == event_id)
     if status_filter:
         q = q.filter(models.EventParticipant.rsvp_status == status_filter)
-    
+
     participants = q.all()
-    
+
     # Format with user details
     result = []
     for p in participants:
@@ -2801,7 +2840,7 @@ def event_participants(event_id: int, db: Session = Depends(get_db), status_filt
                 "rsvp_status": p.rsvp_status.value,
                 "updated_at": p.updated_at.isoformat() if p.updated_at else None
             })
-    
+
     return result
 
 @router.get("/events")
@@ -2812,7 +2851,7 @@ def list_events(request: Request, db: Session = Depends(get_db), type: Optional[
         current_user_id = current.user_id
     except:
         current_user_id = None
-    
+
     # Filter events based on type
     if type == "HOSTING" and current_user_id:
         events = db.query(models.Event).filter(
@@ -2831,7 +2870,7 @@ def list_events(request: Request, db: Session = Depends(get_db), type: Optional[
         events = db.query(models.Event).filter(
             models.Event.privacy_setting == models.EventPrivacy.PUBLIC
         ).all()
-    
+
     # Format events with host info and counts
     result = []
     for event in events:
@@ -2856,18 +2895,18 @@ def list_events(request: Request, db: Session = Depends(get_db), type: Optional[
                     "avatar": host.avatar_url,
                     "username": host.page_username
                 }
-        
+
         # Get participant counts
         going_count = db.query(models.EventParticipant).filter(
             models.EventParticipant.event_id == event.event_id,
             models.EventParticipant.rsvp_status == models.RSVPStatus.GOING
         ).count()
-        
+
         interested_count = db.query(models.EventParticipant).filter(
             models.EventParticipant.event_id == event.event_id,
             models.EventParticipant.rsvp_status == models.RSVPStatus.INTERESTED
         ).count()
-        
+
         # Get current user's RSVP
         user_rsvp = None
         if current_user_id:
@@ -2877,7 +2916,7 @@ def list_events(request: Request, db: Session = Depends(get_db), type: Optional[
             ).first()
             if participant:
                 user_rsvp = participant.rsvp_status.value
-        
+
         result.append({
             "event_id": event.event_id,
             "host_id": event.host_id,
@@ -2893,7 +2932,7 @@ def list_events(request: Request, db: Session = Depends(get_db), type: Optional[
             "interested_count": interested_count,
             "user_rsvp": user_rsvp
         })
-    
+
     return result
 
 # --- Reports & admin ---

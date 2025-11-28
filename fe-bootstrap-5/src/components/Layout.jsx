@@ -39,6 +39,11 @@ export default function Layout() {
               <li className="nav-item">
                 <Link className="nav-link" to="/events"><i className="bi bi-calendar-event-fill"></i> Events</Link>
               </li>
+              {user?.is_admin && (
+                <li className="nav-item">
+                  <Link className="nav-link" to="/admin"><i className="bi bi-shield-lock-fill"></i> Admin</Link>
+                </li>
+              )}
             </ul>
 
             {/* Right: User Profile & Actions */}

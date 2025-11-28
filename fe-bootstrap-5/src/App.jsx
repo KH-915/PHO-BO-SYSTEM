@@ -18,6 +18,7 @@ import Layout from './components/Layout'
 import AdminLayout from './pages/admin/AdminLayout'
 import Statistics from './pages/admin/Statistics'
 import UserManagement from './pages/admin/UserManagement'
+import AdminRoute from './components/AdminRoute'
 
 // Protected Route Wrapper
 const ProtectedRoute = ({ children }) => {
@@ -74,8 +75,8 @@ export default function App() {
 
         </Route>
 
-        {/* Admin Routes */}
-        <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
+        {/* Admin Routes - Protected by AdminRoute */}
+        <Route path="/admin" element={<AdminRoute><AdminLayout /></AdminRoute>}>
           <Route index element={<Statistics />} />
           <Route path="stats" element={<Statistics />} />
           <Route path="users" element={<UserManagement />} />

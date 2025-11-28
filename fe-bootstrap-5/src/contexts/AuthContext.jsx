@@ -20,6 +20,8 @@ export function AuthProvider({ children }) {
         authService.getMe()
             .then(res => {
                 console.log('Session check success:', res.data);
+                console.log('User roles:', res.data.roles);
+                console.log('Is admin:', res.data.is_admin);
                 setUser(res.data);
             })
             .catch(err => {
@@ -31,6 +33,10 @@ export function AuthProvider({ children }) {
 
     const login = async (email, password) => {
         const res = await authService.login({ email, password });
+        console.log('Login response:', res.data);
+        console.log('User data:', res.data.user);
+        console.log('User roles:', res.data.user.roles);
+        console.log('Is admin:', res.data.user.is_admin);
         setUser(res.data.user);
         return true;
     };
